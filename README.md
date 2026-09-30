@@ -126,42 +126,56 @@ Not yet validated on this cluster — blocked by section 6. The configuration th
 - **There is no VC automation in the deployment repo.** `playbooks/cde-service.yml` creates only the
   *service*, with `gpu_requests: null` and `chart_value_overrides: null`. The `cloudera.cloud.de`
   module does accept both, so the service-level quota (3.2) could move into the playbook later.
-- **`spark-defaults-conf-config-map-<vcId>` naming the CPU image is correct, not a failure.** `gpuImage`
-  is a separate key in `dex.yaml` that the runtime API server substitutes per job when a job requests
-  GPUs. The acceleration flag is what *permits* that substitution.
+- **Do not look for the runtime image in the VC's spark defaults.** `<vcId>-spark-defaults` contains no
+  image reference at all (checked on the live VC). The images live in `dex.yaml` as the sibling keys
+  `image` (CPU) and `gpuImage`, and the runtime API server picks between them per job. So `image`
+  pointing at a CPU runtime is correct, not a failure — the acceleration flag is what *permits* the
+  `gpuImage` substitution.
 
-## 6. Blocker: the GPU runtime images are not published for this build
+## 6. Suspected blocker: the GPU runtime images may not be published for this build
 
-Turning the flag on is necessary but **not sufficient — the images it selects do not exist.**
+Turning the flag on is necessary but appears **not sufficient — the images it selects could not be
+pulled.** This section is deliberately hedged; see "status" below.
 
-This cluster resolves images against `container.repository.cloudera.com/cdp-private/`
-(`docker_registry` + `image_basepath` on the ECS service, with `external_registry_enabled: true`), so
-the image CDE wants is:
+The VC's own `dex.yaml` names exactly what CDE will try to pull. Read it off the cluster rather than
+reconstructing it — that is the authoritative answer:
+
+```bash
+kubectl get cm <vcId>-api-cm -n <vcId> -o jsonpath='{.data.dex\.yaml}' | grep -E 'image:|Image:'
+```
+
+On this VC (`dex-app-qkckw9t9`, checked 2026-09-30) that yields:
 
 ```
-container.repository.cloudera.com/cdp-private/dex-spark-runtime-gpu-3.5.4-7.3.2.0:1.26.0-b557
+image:    container.repository.cloudera.com/cdp-private/cloudera/dex/dex-livy-runtime-3.5.4-7.3.2.0:1.26.0-b557
+gpuImage: container.repository.cloudera.com/cdp-private/cloudera/dex/dex-livy-runtime-gpu-3.5.4-7.3.2.0:1.26.0-b557
+gpuImage: container.repository.cloudera.com/cdp-private/cloudera/dex/dex-spark-runtime-gpu-3.5.4-7.3.2.0:1.26.0-b557
 ```
 
-Verified with differential probe pods in the VC namespace — same node, same `imagePullSecrets`,
-kubelet does the auth, so no credential handling is involved (see `probes/`):
+Note the **`cloudera/dex/`** segment. Every image actually running in the VC namespace carries it
+(`dex-runtime-api-server`, `dex-livy-server-3.5.4-...`, `dex-spark-history-server-3.5.4-...`), so
+`cdp-private/` alone is not where these live.
 
-| image | result |
-|---|---|
-| `dex-spark-runtime-3.5.4-7.3.2.0:1.26.0-b557` (CPU) | **pulls, runs, `Completed`** |
-| `dex-livy-runtime-3.5.4-7.3.2.0:1.26.0-b557` (CPU) | **pulls, `Running`** |
-| `dex-spark-runtime-gpu-3.5.4-7.3.2.0:1.26.0-b557` | `ErrImagePull` → **`NotFound`** |
-| `dex-livy-runtime-gpu-3.5.4-7.3.2.0:1.26.0-b557` | `ErrImagePull` → **`NotFound`** |
+### Status: needs one more probe before it can be called settled
 
-Why this is conclusive rather than a credentials or mirror problem:
+The original probe ran against `cdp-private/<image>` — **without** the `cloudera/dex/` segment. Both
+`-gpu-` variants came back `ErrImagePull` → `NotFound`, while the two CPU variants reportedly pulled.
+Those two facts are hard to reconcile: if the prefix were simply wrong, the CPU controls should have
+failed the same way. So either the registry serves both layouts, or the control result was misread.
 
-- The error is **`NotFound`, not `unauthorized`** — the registry resolved the reference and reported
-  the tag absent.
-- The **CPU variants pull**, which proves the credentials and the `cdp-private` path are fine.
-- There is **no `registries.yaml`** on the ECS nodes, so nothing is rewriting the reference.
+Either way the `NotFound` **cannot be attributed to the GPU images** until the probe is re-run at the
+path `dex.yaml` actually names. `probes/probe_images.sh` now defaults to the corrected prefix; re-run
+it and record the result here before acting on a workaround. What *would* make the result conclusive,
+if it reproduces:
 
-Conclusion: CDE 1.26.0-b557 references GPU runtime images in its chart that are not published to a
-repository this cluster can reach — plausibly a paid entitlement that Private Cloud **Community
-Edition** does not carry.
+- `NotFound` rather than `unauthorized` — the registry resolved the reference and reported the tag
+  absent, which is an availability answer, not a credentials one.
+- The **CPU variants pulling from the same prefix**, which is why they are in the probe list at all.
+- **No `registries.yaml`** on the ECS nodes, so nothing rewrites the reference.
+
+The hypothesis to confirm or kill: CDE 1.26.0-b557 references GPU runtime images that are not
+published to a repository this cluster can reach — plausibly a paid entitlement that Private Cloud
+**Community Edition** does not carry.
 
 Also relevant to any workaround: the control plane runs `ContainerInfo.Mode: public` with
 `CopyDocker: false`, and there is no Harbor/Nexus/Artifactory anywhere in the deployment. **There is no
@@ -173,6 +187,10 @@ Worth ruling out first: GPU *scheduling* is fine. The `nvidia` Ansible role deli
 availability.
 
 ## 7. Next steps
+
+**First, re-run the probe at the corrected path** (`probes/probe_images.sh`, which now defaults to the
+`cloudera/dex/` prefix). Everything below assumes the images really are unavailable; that is currently
+a hypothesis, not a finding, and the probe is cheap. Record the outcome in section 6.
 
 **The escape hatch.** The chart templates the GPU image reference as
 

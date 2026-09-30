@@ -23,7 +23,10 @@ if [[ -z "$VC_ID" ]]; then
 fi
 
 KUBECTL="${KUBECTL:-sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml}"
-REGISTRY="${REGISTRY:-container.repository.cloudera.com/cdp-private}"
+# Read straight off the live cluster rather than guessed — the `cloudera/dex` segment is easy
+# to miss, and omitting it makes every probe return NotFound for the wrong reason:
+#   kubectl get cm <vcId>-api-cm -n <vcId> -o jsonpath='{.data.dex\.yaml}' | grep -E 'image:|Image:'
+REGISTRY="${REGISTRY:-container.repository.cloudera.com/cdp-private/cloudera/dex}"
 BUILD="${BUILD:-1.26.0-b557}"
 SPARK="${SPARK:-3.5.4-7.3.2.0}"
 NODE="${NODE:-}"

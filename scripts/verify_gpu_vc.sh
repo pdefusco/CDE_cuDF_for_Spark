@@ -44,9 +44,14 @@ $KUBECTL get cm -n yunikorn -o yaml 2>/dev/null \
   || echo "  (no GPU entry found in the yunikorn queue config)"
 
 echo
-echo "==> 4. Which image the VC's spark defaults name"
-# A CPU image here is CORRECT, not a failure: gpuImage is a separate dex.yaml key that the
-# runtime API server substitutes per job when a job requests GPUs.
-$KUBECTL get cm "spark-defaults-conf-config-map-${VC_ID}" -n "$VC_ID" \
-  -o yaml 2>/dev/null | grep -o 'dex-[a-z-]*runtime[^ "]*' | sort -u \
-  || echo "  (spark defaults configmap not found)"
+echo "==> 4. The runtime images this VC will actually try to pull"
+# These come from dex.yaml, NOT from <vcId>-spark-defaults (which holds no image reference).
+# `image` is the CPU runtime and `gpuImage` its GPU twin; the runtime API server picks between
+# them per job. A CPU value for `image` is correct, not a failure.
+#
+# Note the `cloudera/dex/` path segment in the output. Copy these references verbatim into
+# probes/probe_images.sh rather than reconstructing them — omitting that segment makes every
+# probe report NotFound for the wrong reason.
+$KUBECTL get cm "${VC_ID}-api-cm" -n "$VC_ID" -o jsonpath='{.data.dex\.yaml}' 2>/dev/null \
+  | grep -E '^ *(image|gpuImage|initContainerImage):' \
+  || echo "  (could not read dex.yaml from ${VC_ID}-api-cm)"

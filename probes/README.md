@@ -19,6 +19,15 @@ Reading the outcome:
 Re-run this after any registry, entitlement, or CDE version change — it is the cheapest way to tell
 whether the blocker in the top-level README still stands.
 
-Two things that make the conclusion airtight, and are worth preserving if you modify the script:
-pin all pods to the **same node** (`NODE=...`) so node-local registry config cannot differ between
-them, and keep the CPU variants in the list.
+Three things make the conclusion airtight, and are worth preserving if you modify the script:
+
+1. **Get the registry prefix from the cluster, not from memory.** The real path includes a
+   `cloudera/dex/` segment — `container.repository.cloudera.com/cdp-private/cloudera/dex/`. The first
+   probe run omitted it, which is why the top-level README now treats the result as unconfirmed: a
+   wrong prefix returns `NotFound` for every image and says nothing about GPU availability. Check with
+   `kubectl get cm <vcId>-api-cm -n <vcId> -o jsonpath='{.data.dex\.yaml}' | grep -E 'image:|Image:'`,
+   or just run `scripts/verify_gpu_vc.sh`, whose check 4 prints them.
+2. **Pin all pods to the same node** (`NODE=...`) so node-local registry config cannot differ between
+   them.
+3. **Keep the CPU variants in the list.** They are the control, and they must pull from the *same
+   prefix* as the GPU ones for the comparison to hold.
