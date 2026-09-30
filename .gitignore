@@ -1,0 +1,42 @@
+# --- Credentials. This remote is public; the source deployment repo holds real secrets. ---
+# Never commit anything from cdp-environments/pvc_env_*/ — config.yml there carries
+# common_password, AWS keys and the FreeIPA admin password in cleartext.
+config.yml
+config*.yml
+*.pem
+*.key
+*.crt
+*.p12
+*.jks
+*.keytab
+kubeconfig
+*kubeconfig*
+rke2.yaml
+.kube/
+*-ssh.config
+credentials
+.env
+.env.*
+
+# --- Ansible / Terraform state, which also leaks addresses and secrets ---
+ansible-navigator.log
+*.retry
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- macOS / editors ---
+.DS_Store
+.idea/
+.vscode/
+*.swp
