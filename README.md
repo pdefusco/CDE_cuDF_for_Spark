@@ -132,10 +132,9 @@ Not yet validated on this cluster — blocked by section 6. The configuration th
   pointing at a CPU runtime is correct, not a failure — the acceleration flag is what *permits* the
   `gpuImage` substitution.
 
-## 6. Suspected blocker: the GPU runtime images may not be published for this build
+## 6. Blocker: the GPU runtime images are not published for this build
 
-Turning the flag on is necessary but appears **not sufficient — the images it selects could not be
-pulled.** This section is deliberately hedged; see "status" below.
+Turning the flag on is necessary but **not sufficient — the images it selects do not exist.**
 
 The VC's own `dex.yaml` names exactly what CDE will try to pull. Read it off the cluster rather than
 reconstructing it — that is the authoritative answer:
@@ -156,26 +155,31 @@ Note the **`cloudera/dex/`** segment. Every image actually running in the VC nam
 (`dex-runtime-api-server`, `dex-livy-server-3.5.4-...`, `dex-spark-history-server-3.5.4-...`), so
 `cdp-private/` alone is not where these live.
 
-### Status: needs one more probe before it can be called settled
+Verified with differential probe pods in the VC namespace — same node, same `imagePullSecrets`,
+kubelet does the auth, so no credential handling is involved (see `probes/`). All four were probed
+under the `cdp-private/cloudera/dex/` prefix above:
 
-The original probe ran against `cdp-private/<image>` — **without** the `cloudera/dex/` segment. Both
-`-gpu-` variants came back `ErrImagePull` → `NotFound`, while the two CPU variants reportedly pulled.
-Those two facts are hard to reconcile: if the prefix were simply wrong, the CPU controls should have
-failed the same way. So either the registry serves both layouts, or the control result was misread.
+| image | result |
+|---|---|
+| `dex-spark-runtime-3.5.4-7.3.2.0:1.26.0-b557` (CPU) | **pulls, runs, `Completed`** |
+| `dex-livy-runtime-3.5.4-7.3.2.0:1.26.0-b557` (CPU) | **pulls, `Running`** |
+| `dex-spark-runtime-gpu-3.5.4-7.3.2.0:1.26.0-b557` | `ErrImagePull` → **`NotFound`** |
+| `dex-livy-runtime-gpu-3.5.4-7.3.2.0:1.26.0-b557` | `ErrImagePull` → **`NotFound`** |
 
-Either way the `NotFound` **cannot be attributed to the GPU images** until the probe is re-run at the
-path `dex.yaml` actually names. `probes/probe_images.sh` now defaults to the corrected prefix; re-run
-it and record the result here before acting on a workaround. What *would* make the result conclusive,
-if it reproduces:
+Why this is conclusive rather than a credentials, mirror, or wrong-path problem:
 
-- `NotFound` rather than `unauthorized` — the registry resolved the reference and reported the tag
-  absent, which is an availability answer, not a credentials one.
-- The **CPU variants pulling from the same prefix**, which is why they are in the probe list at all.
-- **No `registries.yaml`** on the ECS nodes, so nothing rewrites the reference.
+- The error is **`NotFound`, not `unauthorized`** — the registry resolved the reference and reported
+  the tag absent. That is an availability answer, not a credentials one.
+- The **CPU variants pull from the same prefix**, which is the whole reason they are in the probe list.
+  They rule out credentials *and* rule out a mistyped repository path.
+- There is **no `registries.yaml`** on the ECS nodes, so nothing is rewriting the reference.
 
-The hypothesis to confirm or kill: CDE 1.26.0-b557 references GPU runtime images that are not
-published to a repository this cluster can reach — plausibly a paid entitlement that Private Cloud
-**Community Edition** does not carry.
+Conclusion: CDE 1.26.0-b557 references GPU runtime images in its chart that are not published to a
+repository this cluster can reach — plausibly a paid entitlement that Private Cloud **Community
+Edition** does not carry. With the flag on, a GPU job gets `ImagePullBackOff` rather than a GPU.
+
+Keep the prefix in mind if you re-probe: an earlier draft of this file dropped the `cloudera/dex/`
+segment. A wrong prefix returns `NotFound` for *every* image, GPU or not, and tells you nothing.
 
 Also relevant to any workaround: the control plane runs `ContainerInfo.Mode: public` with
 `CopyDocker: false`, and there is no Harbor/Nexus/Artifactory anywhere in the deployment. **There is no
@@ -188,9 +192,9 @@ availability.
 
 ## 7. Next steps
 
-**First, re-run the probe at the corrected path** (`probes/probe_images.sh`, which now defaults to the
-`cloudera/dex/` prefix). Everything below assumes the images really are unavailable; that is currently
-a hypothesis, not a finding, and the probe is cheap. Record the outcome in section 6.
+**Re-run the probe after any registry, entitlement, or CDE version change** —
+`probes/probe_images.sh` is the cheapest way to tell whether section 6 still holds before spending
+effort on a workaround.
 
 **The escape hatch.** The chart templates the GPU image reference as
 
