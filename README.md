@@ -297,13 +297,18 @@ and the patch would become a no-op — better to fail the build than ship that.
 | Spark build | Runtime / CDP | ctor |
 |---|---|---|
 | Cloudera `3.5.1.1.23.7218.0-28` | 7.2.18 / 1.23 | 7 args — links |
-| Cloudera `3.5.4.1.25.731.0-41` | 7.3.1 / 1.25 (what CAI runs) | unmeasured |
+| Cloudera `3.5.4.1.25.731.0-41` | 7.3.1 / 1.25 (what CAI runs) | 7 args — inferred¹ |
 | Cloudera `3.5.4.1.26.732.0-45` | **7.3.2 / 1.26 (here)** | **8 args — fails** |
 | Apache 3.5.4–3.5.7, 4.0.0, 4.0.1 | — | 7 args |
 
 So the parameter entered in the Cloudera 7.3.2/1.26 line. This reconciles a real contradiction worth
 recording: the CAI demos run the *same* dependency set — RAPIDS 26.02.0, `spark354` shim, cuda12 —
 successfully, on `3.5.4.1.25.731.0-41`. Same dependencies, different Spark build.
+
+¹ 1.25's jars were never read directly, but the arity follows: CAI runs RAPIDS green on 1.25, and the
+broken call sits in `GpuExec.doExecuteColumnar`, which **every** GPU operator inherits. An 8-arg ctor
+there would fail every GPU query on 1.25 too. Note this is the *only* measured difference between the
+1.25 and 1.26 Spark builds — `FileScan` and `InSubqueryExec`, checked on both, are identical.
 
 Also ruled out rather than assumed: **no OSS RAPIDS release can fix this**, because the 8-arg
 constructor exists in no Apache Spark release, so NVIDIA has never had a Spark to compile it against.
@@ -335,30 +340,75 @@ boundary. The reason this generalises further than a 9-operator list suggests: t
 broken is reached from `GpuExec.doExecuteColumnar`, which **every** GPU operator inherits. The fix is at
 the base of all of them, not in the particular operators above.
 
-### Should work, but is not yet proven here
+### What about everything else RAPIDS calls?
 
-Joins, windows, Parquet/ORC read and write, `saveAsTable` into Hive, UDFs, and the other RAPIDS shuffle
-modes. Nothing known stands in the way — but a `spark.range()` smoke test touches far less Spark
-surface than a real ETL, so treat these as untested rather than working. **Porting the 250M-row Hive ETL
-is the next real test.**
+The patch fixes **one** `NoSuchMethodError`. Whether it is the only one was measured rather than
+guessed — not by diffing Cloudera's Spark against Apache's (thousands of irrelevant differences), but by
+asking the one question the JVM asks at link time: *for every Spark symbol the RAPIDS jar references,
+does a member with a matching descriptor exist in the jars in this image?*
+
+| | |
+|---|---|
+| Classes in scope (after filtering to the shims that load on 3.5.4) | 5,397 of 17,833 |
+| Unique external Spark references | 4,473 |
+| Resolve | 4,457 — **99.6%** |
+| Do not resolve | **16** |
+| Still reachable in a default configuration after triage | **1** |
+
+The 16 triage down as follows — a raw miss list is not a defect list, so each was traced to its calling
+bytecode:
+
+| missing symbol | verdict |
+|---|---|
+| `InSubqueryExec.copy` + 6 defaults | **Dead code.** The caller is an orphan anonfun in `spark-shared/`; `spark354/` ships its own `FileSourceScanExecMeta` that shadows it and never references `InSubqueryExec`. Initially ranked the top risk — it is not a risk. |
+| `FileScan.…$$normalizedPartitionFilters$` / `…DataFilters$` | **Real mismatch, unreachable.** `FileScan` is the DataSource **v2** path; `spark.sql.sources.useV1SourceList` keeps parquet/orc/avro on v1, so `GpuParquetScan`/`GpuOrcScan`/`GpuAvroScan` never load. Also present on **1.25**, so not a 1.26 regression. |
+| `CreateHiveTableAsSelectCommand.outputColumns` | **Mis-attributed.** RAPIDS calls `DataWritingCommand.outputColumns$`, which 1.26 declares. |
+| push-based shuffle merge (2), storage-partitioned join (3) | Gated behind flags that default to off. |
+| **`CreateHiveTableAsSelectCommand.getWritingCommand`** | **Real and reachable.** The one that survives. |
+
+Full method, per-finding evidence, and the scan's limits: [`docs/linkage-scan.md`](docs/linkage-scan.md).
+
+### The one real remaining gap: Hive-serde CTAS
+
+```
+RAPIDS calls:  CreateHiveTableAsSelectCommand.getWritingCommand(SessionCatalog, CatalogTable, boolean)
+1.26 declares: private                        getWritingCommand(CatalogTable, boolean)
+```
+
+Apache 3.5.9 declares it the same way Cloudera does, so this is **Apache maintenance drift after 3.5.4**
+rather than a fork difference — it would break on Apache 3.5.9 too.
+
+It is reached only by `CREATE TABLE … AS SELECT` or `saveAsTable` against a **Hive-serde** table
+(`USING hive`, `STORED AS …`). Default-provider `saveAsTable` routes to
+`GpuCreateDataSourceTableAsSelectCommand`; writes into an existing table go to `GpuInsertIntoHiveTable`;
+Hive **reads** never touch it. It is deliberately **not** patched pre-emptively — it may never fire, and
+unlike `MapPartitionsRDD` it would need a real source edit, not a recompile, because the argument list
+changed.
 
 ### Could still break — and how you would know
 
-Any *other* place where Cloudera's Spark and Apache Spark differ in a binary-incompatible way, if
-RAPIDS happens to call it. These announce themselves unmistakably as another `NoSuchMethodError`,
-`NoSuchFieldError`, or `AbstractMethodError` **naming a Spark class** (not a RAPIDS one) in the first
-action of a query.
+The scan bounds **one** class of failure: linkage against Spark. It says nothing about *behaviour* behind
+a matching signature, nothing about reflection or service loaders, and nothing about RAPIDS against
+Hadoop/Hive/Parquet or the cuDF native layer. Treat the 16 as predictions to test. **Porting the 250M-row
+Hive ETL is the test**; a `spark.range()` smoke test touches far less Spark surface.
 
-The loop is now short, and it is the same loop every time: read the error, `javap` the named Spark class
-out of the runtime image, drop the offending RAPIDS source into `runtime/patch/`, rebuild. Minutes, not
-days. **This patch fixes exactly one such error — it is not a general guarantee of compatibility.**
+Linkage failures announce themselves unmistakably: a `NoSuchMethodError`, `NoSuchFieldError` or
+`AbstractMethodError` **naming a Spark class** (not a RAPIDS one) in the first action of a query. The loop
+is short and always the same — read the error, `javap` the named Spark class out of the runtime image,
+drop the offending RAPIDS source into `runtime/patch/`, rebuild. Minutes, not days.
+
+One behavioural question the scan cannot see is worth naming: the patch makes RAPIDS inherit Cloudera's
+default `isDeterministic`, which feeds `getOutputDeterministicLevel()` and decides whether a partition may
+be recomputed after a fetch failure. Whether that default suits a GPU columnar RDD is uninvestigated, and
+would surface only under task retry or node loss.
 
 ### Will not be fixed by this approach
 
 - **A genuinely removed or renamed API.** The recompile trick works *only* because the added parameter
   is defaulted, leaving upstream source still valid. If Cloudera removes a method RAPIDS calls, or
   changes a signature incompatibly at the source level, the source would no longer compile and you
-  would be doing a real port — a different and much larger job.
+  would be doing a real port — a different and much larger job. `getWritingCommand` above is exactly
+  this case: its argument list shrank, so a recompile cannot fix it and a source edit would be needed.
 - **Client-version skew unrelated to RAPIDS** — Hive, Ozone, Ranger. (Relevant mainly as the reason the
   "use a 7.3.1 image" route was abandoned: it would put 7.3.1 clients against 7.3.2 services, which
   `spark.range()` would never have caught.)
@@ -419,6 +469,7 @@ scripts/verify_gpu_vc.sh    confirm gpuAccelerationEnabled, queue quota, node GP
 probes/                     the differential image probe that established blocker 1
 docs/gpu-image-availability.md        blocker 1 in full: the probe, its reasoning, the chart hatch
 docs/oss-rapids-vs-cloudera-spark.md  the build-range evidence for blocker 2
+docs/linkage-scan.md        how much else is broken: 4,473 refs scanned, 16 misses, 1 reachable
 docs/rapids-spark-conf.md   Spark RAPIDS configuration and the version-lock matrix
 docs/cde-pvc-prerequisites.md         DE role + keytab onboarding, both easy to miss
 ```
