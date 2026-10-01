@@ -9,8 +9,8 @@ an `isFinalPlan=true` plan containing 8 `Gpu*` operators and zero CPU operators 
 
 Getting there meant routing around **two** separate blockers:
 
-1. CDE 1.26's own GPU runtime images are not published to any registry this cluster can reach
-   (section 6 — still true, and re-probeable).
+1. CDE 1.26's own GPU runtime images are not published to any registry this cluster can reach, so a
+   **custom runtime** has to supply the NVIDIA pieces itself (section 6).
 2. The OSS RAPIDS jar **cannot link** against Cloudera's Spark `3.5.4.1.26.732.0-45` — Cloudera added a
    defaulted 6th parameter to `MapPartitionsRDD`, which is source-compatible but binary-incompatible,
    so every GPU plan died at the first action with `NoSuchMethodError`.
@@ -21,6 +21,7 @@ cluster's own `spark-core`, using the CDE base image as its own toolchain, and s
 
 ➡ **Runbook, exact version strings, Docker + CDE CLI steps, and verified output:
 [`docs/custom-gpu-runtime.md`](docs/custom-gpu-runtime.md)**
+➡ **What this does and does not make possible: section 8** — read this before relying on it.
 ➡ Why the patch is legitimate and what it does *not* cover:
 [`runtime/README-patch.md`](runtime/README-patch.md)
 
@@ -165,120 +166,229 @@ driver is cgroup-OOM-killed with no Java stack trace: the log just stops.
   pointing at a CPU runtime is correct, not a failure — the acceleration flag is what *permits* the
   `gpuImage` substitution.
 
-## 6. Blocker 1: the GPU runtime images are not published for this build
+## 6. Blocker 1: a custom runtime image has to supply the NVIDIA pieces
 
-**Still true** — but routed around with a custom runtime (section 4), which overrides the VC's
-`gpuImage` outright. Keep this section because the probe is the cheapest way to tell whether a registry
-or entitlement change has made the supported path available.
+Enabling GPU acceleration makes CDE select a **GPU variant** of its runtime image — and on this build
+those images are not published to any registry the cluster can reach. They return `NotFound` (not
+`unauthorized`; the CPU variants pull fine from the same prefix), plausibly a paid entitlement that
+Community Edition does not carry. With the flag on and nothing else done, a GPU job gets
+`ImagePullBackOff` rather than a GPU.
 
-Turning the flag on is necessary but **not sufficient — the images it selects do not exist.**
+The fix is a **CDE custom runtime**: build our own image on CDE's *CPU* Spark runtime base and add the
+GPU parts ourselves. A custom runtime overrides the VC's `gpuImage` selection outright and needs **no
+VC recreate**, which makes it better than the chart override even where both are possible.
 
-The VC's own `dex.yaml` names exactly what CDE will try to pull. Read it off the cluster rather than
-reconstructing it — that is the authoritative answer:
+What actually has to go into that image is small — only two things:
 
-```bash
-kubectl get cm <vcId>-api-cm -n <vcId> -o jsonpath='{.data.dex\.yaml}' | grep -E 'image:|Image:'
-```
-
-On this VC (`dex-app-qkckw9t9`, checked 2026-09-30) that yields:
-
-```
-image:    container.repository.cloudera.com/cdp-private/cloudera/dex/dex-livy-runtime-3.5.4-7.3.2.0:1.26.0-b557
-gpuImage: container.repository.cloudera.com/cdp-private/cloudera/dex/dex-livy-runtime-gpu-3.5.4-7.3.2.0:1.26.0-b557
-gpuImage: container.repository.cloudera.com/cdp-private/cloudera/dex/dex-spark-runtime-gpu-3.5.4-7.3.2.0:1.26.0-b557
-```
-
-Note the **`cloudera/dex/`** segment. Every image actually running in the VC namespace carries it
-(`dex-runtime-api-server`, `dex-livy-server-3.5.4-...`, `dex-spark-history-server-3.5.4-...`), so
-`cdp-private/` alone is not where these live.
-
-Verified with differential probe pods in the VC namespace — same node, same `imagePullSecrets`,
-kubelet does the auth, so no credential handling is involved (see `probes/`). All four were probed
-under the `cdp-private/cloudera/dex/` prefix above:
-
-| image | result |
+| Added to the base image | Why |
 |---|---|
-| `dex-spark-runtime-3.5.4-7.3.2.0:1.26.0-b557` (CPU) | **pulls, runs, `Completed`** |
-| `dex-livy-runtime-3.5.4-7.3.2.0:1.26.0-b557` (CPU) | **pulls, `Running`** |
-| `dex-spark-runtime-gpu-3.5.4-7.3.2.0:1.26.0-b557` | `ErrImagePull` → **`NotFound`** |
-| `dex-livy-runtime-gpu-3.5.4-7.3.2.0:1.26.0-b557` | `ErrImagePull` → **`NotFound`** |
+| `rapids-4-spark_2.12-26.02.0-cuda12.jar` → `/opt/spark/jars/` | The RAPIDS plugin **and** the native GPU libraries. The jar bundles cuDF and the CUDA runtime it needs, so **no CUDA toolkit install and no NVIDIA base image are required** — that is why this is a `COPY`, not a package install. It must land in `jars/`, not `optional-lib/`: `RapidsShuffleManager` has to resolve while the executor is still starting. |
+| `getGpusResources.sh` → `/opt/cde/gpu/` | The discovery script Spark calls to enumerate GPUs and assign them to executors. Ours replaces the stock one so that a missing `nvidia-smi` yields a valid empty address list — a misconfiguration then surfaces as "0 GPUs" instead of a JSON parse error that names nothing. |
 
-Why this is conclusive rather than a credentials, mirror, or wrong-path problem:
+What does **not** go in, and is worth knowing so you don't look for it:
 
-- The error is **`NotFound`, not `unauthorized`** — the registry resolved the reference and reported
-  the tag absent. That is an availability answer, not a credentials one.
-- The **CPU variants pull from the same prefix**, which is the whole reason they are in the probe list.
-  They rule out credentials *and* rule out a mistyped repository path.
-- There is **no `registries.yaml`** on the ECS nodes, so nothing is rewriting the reference.
+- **The NVIDIA driver** (615.71.09 / CUDA 13.4 here) lives on the host, not in the container. A 13.4
+  driver runs CUDA 12 binaries fine, which is why the `cuda12` jar is correct.
+- **The Kubernetes device plugin** — ECS supplies it. The `nvidia` Ansible role deliberately skips
+  `nvidia-ctk runtime configure`, yet workers still advertise `nvidia.com/gpu: 1`. GPU *scheduling* was
+  never the problem.
+- **Anything to make the base image GPU-aware.** Keep the CDE runtime base: that is what makes the
+  result a legal `custom-runtime-image` resource, and it must still run as uid 1345 (CDE rejects a
+  runtime image that would run as root).
 
-Conclusion: CDE 1.26.0-b557 references GPU runtime images in its chart that are not published to a
-repository this cluster can reach — plausibly a paid entitlement that Private Cloud **Community
-Edition** does not carry. With the flag on, a GPU job gets `ImagePullBackOff` rather than a GPU.
-
-Keep the prefix in mind if you re-probe: an earlier draft of this file dropped the `cloudera/dex/`
-segment. A wrong prefix returns `NotFound` for *every* image, GPU or not, and tells you nothing.
-
-Also relevant to any workaround: the control plane runs `ContainerInfo.Mode: public` with
-`CopyDocker: false`, and there is no Harbor/Nexus/Artifactory anywhere in the deployment. **There is no
-local registry to push a replacement image to.**
-
-Worth ruling out first: GPU *scheduling* is fine. The `nvidia` Ansible role deliberately does not run
-`nvidia-ctk runtime configure` or install a device plugin, yet the workers advertise
-`nvidia.com/gpu: 1` — ECS supplies the device plugin itself. The blocker really is only image
-availability.
+Build and registration commands are in
+[`docs/custom-gpu-runtime.md`](docs/custom-gpu-runtime.md). The image-availability evidence, the
+re-runnable probe, and the chart escape hatch are in
+[`docs/gpu-image-availability.md`](docs/gpu-image-availability.md) — re-probe after any registry,
+entitlement, or CDE version change, because **if Cloudera's GPU runtime becomes available, the right
+move is to delete all of this and use it.**
 
 ## 7. Blocker 2: the OSS RAPIDS jar cannot link against Cloudera's Spark
 
-With a pullable image in hand, the next failure was a **linkage** error, which no amount of
+With a pullable image in hand, the next failure was a **linkage** error — a category no amount of
 configuration reaches:
 
 ```
 java.lang.NoSuchMethodError: 'void org.apache.spark.rdd.MapPartitionsRDD.<init>(
     org.apache.spark.rdd.RDD, scala.Function3, boolean, boolean, boolean,
     scala.reflect.ClassTag, scala.reflect.ClassTag)'
+  at org.apache.spark.rapids.LocationPreservingMapPartitionsRDD.<init>(…:44)
   at com.nvidia.spark.rapids.GpuExec.doExecuteColumnar(GpuExec.scala:341)
 ```
 
-Cloudera's `3.5.4.1.26.732.0-45` added a **defaulted** 6th constructor parameter
-(`isDeterministic: Option[Boolean]`). Defaulted means *source*-compatible but **binary**-incompatible:
-only pre-compiled callers break. The call site is the base method for every GPU operator, so it fires
-on any GPU plan.
+### What Cloudera changed
 
-**Fixed by recompiling, not by patching logic.** Because the parameter is defaulted, the unmodified
-upstream source emits the 8-arg call when compiled against Cloudera's `spark-core` — and the CDE base
-image already ships both `scala-compiler-2.12.19.jar` and the exact `spark-core` jar, so it is its own
-toolchain. Only 2 classes of 17,833 call that constructor.
+Cloudera's `3.5.4.1.26.732.0-45` carries a **modification to Apache Spark's own
+`org.apache.spark.rdd.MapPartitionsRDD`**: a sixth constructor parameter,
+`isDeterministic: Option[Boolean]`, feeding a new private `defaultMapOutputDeterministicLevel()` that
+`getOutputDeterministicLevel()` reads. Verified with `javap` against the cluster's own
+`spark-core_2.12-3.5.4.1.26.732.0-45.jar`. There is **no 7-arg overload** left.
 
-This is a **build window**, not a fork-wide difference: Cloudera 7.2.18 links fine, as does every Apache
-release 3.5.4–4.0.1. Evidence table in
-[`docs/oss-rapids-vs-cloudera-spark.md`](docs/oss-rapids-vs-cloudera-spark.md); the patch itself in
+Vendor distributions carrying their own patches is normal and expected. What makes this one bite is the
+*shape* of the change: a **defaulted** parameter is
+
+- **source-compatible** — anything that compiles against Apache Spark still compiles against
+  Cloudera's, because the Scala compiler fills the parameter in; so all of Cloudera's own code, and
+  their entire CI, recompiles and passes cleanly, and
+- **binary-incompatible** — a class compiled *earlier*, against Apache Spark, has the 7-arg descriptor
+  already baked into its bytecode.
+
+The JVM resolves a method call by **exact descriptor match**, with no overload fallback at link time.
+So only **pre-compiled third-party consumers** break — which is exactly what the OSS RAPIDS jar is, and
+why nothing in Cloudera's own test matrix would have caught it.
+
+It is also unavoidable rather than operator-specific: the call site is reached from
+`GpuExec.doExecuteColumnar`, the base method **every** GPU operator inherits. Any GPU plan at all hits
+it on its first action.
+
+### Why the fix is a recompile and not a code change
+
+Here is NVIDIA's source, unmodified — note it passes **five** arguments and never mentions
+`isDeterministic`:
+
+```scala
+class LocationPreservingMapPartitionsRDD[U: ClassTag, T: ClassTag](
+    prev: RDD[T], f: (TaskContext, Int, Iterator[T]) => Iterator[U],
+    preservesPartitioning: Boolean = false, isFromBarrier: Boolean = false,
+    isOrderSensitive: Boolean = false)
+    extends MapPartitionsRDD[U, T](prev, f,
+      preservesPartitioning = preservesPartitioning,
+      isFromBarrier = isFromBarrier,
+      isOrderSensitive = isOrderSensitive) {
+```
+
+Because the new parameter is defaulted, **that same text is already legal against Cloudera's
+constructor.** Compile it against Cloudera's `spark-core` and scalac emits the 8-arg call on its own,
+filling the gap from Cloudera's `$lessinit$greater$default$6()` — i.e. with **Cloudera's own default
+value**, not a guess of ours.
+
+So the patch alters **no RAPIDS logic whatsoever**. The only difference between our classes and
+NVIDIA's is the method descriptor in the emitted bytecode. There is no behavioural change to review, no
+judgement call about what `isDeterministic` ought to be, and nothing that can drift from upstream
+semantics. That is what makes a patched third-party jar defensible here at all.
+
+The alternative — *patching logic* — would mean rewriting the subclass to construct its parent
+differently, or rewriting the descriptor with a bytecode tool. Either produces code that is no longer
+NVIDIA's, needs its own correctness review, and is then hard-wired to Cloudera's 8-arg shape so it
+breaks on Apache Spark. Recompiling has none of those properties.
+
+**The CDE base image is its own toolchain**, which is what makes this cheap and removes all doubt about
+what we compiled against: it already ships `scala-compiler-2.12.19.jar` *and* the exact `spark-core`
+jar. Compile `-target:jvm-1.8` (every class in the jar is major version 52), and write the output back
+to both prefixes RAPIDS loads from — `spark354/` for the classes, `spark-shared/` for the `$`
+default-arg companions.
+
+### Why only two classes
+
+A byte-exact scan of all 17,833 classes in the jar for the 7-arg descriptor found just **two** real
+classes (plus one synthetic companion):
+`org.apache.spark.rapids.LocationPreservingMapPartitionsRDD` and
+`org.apache.spark.sql.rapids.execution.GpuColumnToRowMapPartitionsRDD`. Both are thin
+`MapPartitionsRDD` subclasses whose whole body is a constructor forward — one adds a
+`getPreferredLocations` override, the other adds nothing. Counting the callers *before* estimating the
+work is what separated "patch it" from "fork it."
+
+The build asserts via `javap -c` that both emit the 8-arg call, and that exactly 4 patched entries land
+in the jar. If a future base image drops the parameter, scalac would silently emit the 7-arg call again
+and the patch would become a no-op — better to fail the build than ship that.
+
+### It is a build window, not a fork-wide difference
+
+| Spark build | Runtime / CDP | ctor |
+|---|---|---|
+| Cloudera `3.5.1.1.23.7218.0-28` | 7.2.18 / 1.23 | 7 args — links |
+| Cloudera `3.5.4.1.25.731.0-41` | 7.3.1 / 1.25 (what CAI runs) | unmeasured |
+| Cloudera `3.5.4.1.26.732.0-45` | **7.3.2 / 1.26 (here)** | **8 args — fails** |
+| Apache 3.5.4–3.5.7, 4.0.0, 4.0.1 | — | 7 args |
+
+So the parameter entered in the Cloudera 7.3.2/1.26 line. This reconciles a real contradiction worth
+recording: the CAI demos run the *same* dependency set — RAPIDS 26.02.0, `spark354` shim, cuda12 —
+successfully, on `3.5.4.1.25.731.0-41`. Same dependencies, different Spark build.
+
+Also ruled out rather than assumed: **no OSS RAPIDS release can fix this**, because the 8-arg
+constructor exists in no Apache Spark release, so NVIDIA has never had a Spark to compile it against.
+Nor can `shims-provider-override` — `javap -c` shows all of `spark354/355/356/357` emit the 7-arg call.
+
+Full evidence in [`docs/oss-rapids-vs-cloudera-spark.md`](docs/oss-rapids-vs-cloudera-spark.md); the
+patch, its provenance and how to verify it against upstream in
 [`runtime/README-patch.md`](runtime/README-patch.md).
 
-## 8. Next steps and alternatives
+## 8. What this does and does not make possible
+
+First, the thing most likely to be misread: **Spark itself is untouched.** We did not modify, rebuild,
+or override any part of Cloudera's Spark distribution — it runs exactly as shipped. The only changed
+artifact is the **RAPIDS plugin jar**, and the change to it is a recompile of two classes with identical
+source, not an edit. Nothing about this alters Spark's behaviour for any other job, GPU or not.
+
+### Verified working
+
+Run 6, end to end on an A10G: plugin load, shim selection, GPU discovery and assignment, RAPIDS plan
+conversion, and these 8 operators with **no CPU operator below `GpuColumnarToRow`**:
+
+```
+GpuRange → GpuProject → GpuHashAggregate → GpuColumnarExchange
+  → GpuCustomShuffleReader → GpuShuffleCoalesce → GpuHashAggregate → GpuTopN → GpuColumnarToRow
+```
+
+That covers projection, hash aggregation, a **real GPU shuffle**, top-N/sort, and the columnar↔row
+boundary. The reason this generalises further than a 9-operator list suggests: the constructor that was
+broken is reached from `GpuExec.doExecuteColumnar`, which **every** GPU operator inherits. The fix is at
+the base of all of them, not in the particular operators above.
+
+### Should work, but is not yet proven here
+
+Joins, windows, Parquet/ORC read and write, `saveAsTable` into Hive, UDFs, and the other RAPIDS shuffle
+modes. Nothing known stands in the way — but a `spark.range()` smoke test touches far less Spark
+surface than a real ETL, so treat these as untested rather than working. **Porting the 250M-row Hive ETL
+is the next real test.**
+
+### Could still break — and how you would know
+
+Any *other* place where Cloudera's Spark and Apache Spark differ in a binary-incompatible way, if
+RAPIDS happens to call it. These announce themselves unmistakably as another `NoSuchMethodError`,
+`NoSuchFieldError`, or `AbstractMethodError` **naming a Spark class** (not a RAPIDS one) in the first
+action of a query.
+
+The loop is now short, and it is the same loop every time: read the error, `javap` the named Spark class
+out of the runtime image, drop the offending RAPIDS source into `runtime/patch/`, rebuild. Minutes, not
+days. **This patch fixes exactly one such error — it is not a general guarantee of compatibility.**
+
+### Will not be fixed by this approach
+
+- **A genuinely removed or renamed API.** The recompile trick works *only* because the added parameter
+  is defaulted, leaving upstream source still valid. If Cloudera removes a method RAPIDS calls, or
+  changes a signature incompatibly at the source level, the source would no longer compile and you
+  would be doing a real port — a different and much larger job.
+- **Client-version skew unrelated to RAPIDS** — Hive, Ozone, Ranger. (Relevant mainly as the reason the
+  "use a 7.3.1 image" route was abandoned: it would put 7.3.1 clients against 7.3.2 services, which
+  `spark.range()` would never have caught.)
+- **The GPU budget.** 3 GPUs, 1 per worker, `sharing-strategy=none`. Concurrency is capped at 3
+  regardless of anything here.
+- **Support.** This is neither a Cloudera- nor an NVIDIA-supported configuration, and the patched jar
+  gets no security or bugfix stream. It is an internal prototype.
+
+### Version lock — this is pinned harder than it looks
+
+The patch is valid for exactly **RAPIDS 26.02.0** against **Spark `3.5.4.1.26.732.0-45`**. A CDE
+upgrade changes `spark-core`, so the image must be rebuilt — and the build assertion will tell you
+whether the patch is still needed at all. A RAPIDS upgrade means re-extracting the two sources at the
+matching upstream tag. Neither is hard; both are mandatory.
+
+## 9. Next steps and alternatives
 
 **Re-run the probe after any registry, entitlement, or CDE version change** —
-`probes/probe_images.sh` is the cheapest way to tell whether section 6 still holds. If Cloudera's own
-GPU runtime (or just its Cloudera-built RAPIDS jar) becomes available, **delete the patch and use it.**
+`probes/probe_images.sh <vcId>` is the cheapest way to tell whether blocker 1 still holds. If Cloudera's
+own GPU runtime (or just its Cloudera-built RAPIDS jar) becomes available, **delete the patch and use
+it.**
 
 **Port the real workload.** The smoke test proves linkage and plan conversion; it does not prove a
-250M-row Hive ETL. That is where any remaining signature change would surface.
+250M-row Hive ETL. That is where any remaining signature change would surface — see section 8.
 
-**The chart escape hatch**, if a custom runtime were ever not an option. The chart templates the GPU
-image reference as
-
-```
-{{ .Values.dexapp.api.sparkRuntime.gpuImage.override | default (printf "%s/%s-%s-%s:%s" ...) }}
-```
-
-so `dexapp.api.sparkRuntime.gpuImage.override` (and the `livyRuntime` twin) can point at an arbitrary
-image. Being a chart value it is **create-time only** — set it in the *same* `createVc` as the
-acceleration flag rather than discovering that afterwards. The commented-out block in
-`scripts/create_vc_gpu.py` is there for exactly this.
-
-**Where to host such an image.** No local registry exists, and no pull-secret plumbing exists either
-(`docker_user` / `docker_password` are commented out on the ECS service definition). Prefer a registry
-that needs no auth from the cluster — the nodes egress via NAT. ECR in the same region or a public repo
-are the candidates; a private registry means wiring up the pull secret by hand.
+**The chart escape hatch**, if a custom runtime were ever not an option:
+`dexapp.api.sparkRuntime.gpuImage.override` and its `livyRuntime` twin can point at an arbitrary image,
+but being chart values they are **create-time only**. Details, and where to host such an image given
+that no local registry or pull-secret plumbing exists, are in
+[`docs/gpu-image-availability.md`](docs/gpu-image-availability.md).
 
 **Build architecture is the sharp edge.** Workers are amd64 RHEL 9.6; the build host is arm64 Apple
 Silicon. Any image build needs an explicit `--platform linux/amd64` or it produces an image the cluster
@@ -307,6 +417,7 @@ scripts/submit_rapids_smoke_test.sh   the submit, with every non-obvious flag ex
 scripts/create_vc_gpu.py    the verified createVc, incl. the commented gpuImage.override block
 scripts/verify_gpu_vc.sh    confirm gpuAccelerationEnabled, queue quota, node GPU capacity
 probes/                     the differential image probe that established blocker 1
+docs/gpu-image-availability.md        blocker 1 in full: the probe, its reasoning, the chart hatch
 docs/oss-rapids-vs-cloudera-spark.md  the build-range evidence for blocker 2
 docs/rapids-spark-conf.md   Spark RAPIDS configuration and the version-lock matrix
 docs/cde-pvc-prerequisites.md         DE role + keytab onboarding, both easy to miss
