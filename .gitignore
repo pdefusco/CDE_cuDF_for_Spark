@@ -18,6 +18,12 @@ credentials
 .env
 .env.*
 
+# --- Large build inputs. Fetch these, don't commit them. ---
+# The RAPIDS jar is ~887 MB because it self-contains the CUDA libraries — that is the whole
+# reason no CUDA base image is needed. runtime/README.md has the download command.
+runtime/*.jar
+*.jar
+
 # --- Ansible / Terraform state, which also leaks addresses and secrets ---
 ansible-navigator.log
 *.retry

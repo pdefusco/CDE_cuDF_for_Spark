@@ -3,11 +3,29 @@
 Enabling **Spark GPU acceleration on Cloudera Data Engineering (CDE)** running on Cloudera Private
 Cloud, as a step toward running a Spark RAPIDS (cuDF) workload on-prem.
 
-**Outcome so far:** the GPU acceleration switch works and is verified on the cluster — but the GPU
-Spark runtime images that switch selects are **not published to the registry this cluster can reach**,
-so a GPU job gets `ImagePullBackOff` rather than a GPU. The procedure below is correct and reusable;
-the blocker in section 6 is where it stops. Internal technical prototype, not a supported
-configuration.
+**Outcome: working.** A Spark RAPIDS query runs end-to-end on an NVIDIA A10G on CDE 1.26, verified by
+an `isFinalPlan=true` plan containing 8 `Gpu*` operators and zero CPU operators below
+`GpuColumnarToRow`.
+
+Getting there meant routing around **two** separate blockers:
+
+1. CDE 1.26's own GPU runtime images are not published to any registry this cluster can reach
+   (section 6 — still true, and re-probeable).
+2. The OSS RAPIDS jar **cannot link** against Cloudera's Spark `3.5.4.1.26.732.0-45` — Cloudera added a
+   defaulted 6th parameter to `MapPartitionsRDD`, which is source-compatible but binary-incompatible,
+   so every GPU plan died at the first action with `NoSuchMethodError`.
+
+The second is fixed by recompiling **two unmodified upstream classes** (of 17,833) against the
+cluster's own `spark-core`, using the CDE base image as its own toolchain, and shipping the result as a
+**CDE custom runtime** — which needs no VC recreate.
+
+➡ **Runbook, exact version strings, Docker + CDE CLI steps, and verified output:
+[`docs/custom-gpu-runtime.md`](docs/custom-gpu-runtime.md)**
+➡ Why the patch is legitimate and what it does *not* cover:
+[`runtime/README-patch.md`](runtime/README-patch.md)
+
+Internal technical prototype, not a supported configuration. The runtime image contains a modified
+third-party artifact.
 
 ## 1. Environment
 
@@ -92,11 +110,26 @@ kubectl get cm <vcId>-api-cm -n <vcId> -o jsonpath='{.data.dex\.yaml}' | grep gp
 
 The script also confirms the yunikorn leaf queue exposes `nvidia.com/gpu: "3"` under `max`.
 
-## 4. How a job would request a GPU
+## 4. How a job requests a GPU
 
-Not yet validated on this cluster — blocked by section 6. The configuration that is known to work for
-**Spark 3.5.4** (carried over from prior Spark RAPIDS work on Cloudera AI) is in
+**Validated on this cluster** — job run 6, `Succeeded`, 8 `Gpu*` operators in the final plan. The full
+procedure (build, push, `cde resource create`, `cde spark submit`) and the verified driver output are in
+[`docs/custom-gpu-runtime.md`](docs/custom-gpu-runtime.md). The shortest form:
+
+```bash
+cde --config-profile <profile> resource create \
+  --name cde-rapids-runtime-p1 --type custom-runtime-image --image-engine spark3 \
+  --image pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-p1
+
+RUNTIME_RESOURCE=cde-rapids-runtime-p1 ./scripts/submit_rapids_smoke_test.sh
+```
+
+The version-lock matrix (jar ↔ shim ↔ shuffle manager ↔ Spark patch version) is in
 `docs/rapids-spark-conf.md`.
+
+**Sizing must go through CDE's native flags, not `--conf`** — CDE applies its job spec after merging
+`--conf`, so `--conf spark.executor.memory=8g` is silently replaced by the spec default of 1g. And a 1g
+driver is cgroup-OOM-killed with no Java stack trace: the log just stops.
 
 ## 5. Gotchas
 
@@ -132,7 +165,11 @@ Not yet validated on this cluster — blocked by section 6. The configuration th
   pointing at a CPU runtime is correct, not a failure — the acceleration flag is what *permits* the
   `gpuImage` substitution.
 
-## 6. Blocker: the GPU runtime images are not published for this build
+## 6. Blocker 1: the GPU runtime images are not published for this build
+
+**Still true** — but routed around with a custom runtime (section 4), which overrides the VC's
+`gpuImage` outright. Keep this section because the probe is the cheapest way to tell whether a registry
+or entitlement change has made the supported path available.
 
 Turning the flag on is necessary but **not sufficient — the images it selects do not exist.**
 
@@ -190,13 +227,44 @@ Worth ruling out first: GPU *scheduling* is fine. The `nvidia` Ansible role deli
 `nvidia.com/gpu: 1` — ECS supplies the device plugin itself. The blocker really is only image
 availability.
 
-## 7. Next steps
+## 7. Blocker 2: the OSS RAPIDS jar cannot link against Cloudera's Spark
+
+With a pullable image in hand, the next failure was a **linkage** error, which no amount of
+configuration reaches:
+
+```
+java.lang.NoSuchMethodError: 'void org.apache.spark.rdd.MapPartitionsRDD.<init>(
+    org.apache.spark.rdd.RDD, scala.Function3, boolean, boolean, boolean,
+    scala.reflect.ClassTag, scala.reflect.ClassTag)'
+  at com.nvidia.spark.rapids.GpuExec.doExecuteColumnar(GpuExec.scala:341)
+```
+
+Cloudera's `3.5.4.1.26.732.0-45` added a **defaulted** 6th constructor parameter
+(`isDeterministic: Option[Boolean]`). Defaulted means *source*-compatible but **binary**-incompatible:
+only pre-compiled callers break. The call site is the base method for every GPU operator, so it fires
+on any GPU plan.
+
+**Fixed by recompiling, not by patching logic.** Because the parameter is defaulted, the unmodified
+upstream source emits the 8-arg call when compiled against Cloudera's `spark-core` — and the CDE base
+image already ships both `scala-compiler-2.12.19.jar` and the exact `spark-core` jar, so it is its own
+toolchain. Only 2 classes of 17,833 call that constructor.
+
+This is a **build window**, not a fork-wide difference: Cloudera 7.2.18 links fine, as does every Apache
+release 3.5.4–4.0.1. Evidence table in
+[`docs/oss-rapids-vs-cloudera-spark.md`](docs/oss-rapids-vs-cloudera-spark.md); the patch itself in
+[`runtime/README-patch.md`](runtime/README-patch.md).
+
+## 8. Next steps and alternatives
 
 **Re-run the probe after any registry, entitlement, or CDE version change** —
-`probes/probe_images.sh` is the cheapest way to tell whether section 6 still holds before spending
-effort on a workaround.
+`probes/probe_images.sh` is the cheapest way to tell whether section 6 still holds. If Cloudera's own
+GPU runtime (or just its Cloudera-built RAPIDS jar) becomes available, **delete the patch and use it.**
 
-**The escape hatch.** The chart templates the GPU image reference as
+**Port the real workload.** The smoke test proves linkage and plan conversion; it does not prove a
+250M-row Hive ETL. That is where any remaining signature change would surface.
+
+**The chart escape hatch**, if a custom runtime were ever not an option. The chart templates the GPU
+image reference as
 
 ```
 {{ .Values.dexapp.api.sparkRuntime.gpuImage.override | default (printf "%s/%s-%s-%s:%s" ...) }}
@@ -220,15 +288,26 @@ cannot run.
 **patch** version are a four-way lock. See `docs/rapids-spark-conf.md` — for Spark 3.5.4 the proven
 combination is `rapids-4-spark_2.12:26.02.0` with the `spark354` shim.
 
-**RAPIDS falls back to CPU silently.** A green job proves nothing, and neither does a wall-clock
-number on its own. Verify with `spark.rapids.sql.explain=NOT_ON_GPU` in the executor logs plus live
-`nvidia-smi`.
+**RAPIDS falls back to CPU silently — and the obvious check reports false CPU verdicts.** A green job
+proves nothing, and neither does a wall-clock number. But with AQE on, reading the plan the naive way
+reports *pre-conversion CPU operator names* on a run that was fully GPU-accelerated; that produced a
+false `FAIL: ran on the CPU` twice here. Read the plan **after** the action and **off the same DataFrame
+the action ran on**, then assert `isFinalPlan=true` — details in
+[`docs/custom-gpu-runtime.md`](docs/custom-gpu-runtime.md) §6.
 
 ## Repo layout
 
 ```
+docs/custom-gpu-runtime.md  ** the end-to-end runbook: versions, Docker + CDE CLI, verified output
+runtime/Dockerfile          the custom runtime: two-stage, recompiles 2 RAPIDS classes in-image
+runtime/README-patch.md     why the patch is legitimate, its provenance, and its limits
+runtime/patch/*.scala       the two unmodified upstream NVIDIA sources that get recompiled
+jobs/rapids_smoke_test.py   proves plugin load, GPU visibility, and Gpu* operators in the final plan
+scripts/submit_rapids_smoke_test.sh   the submit, with every non-obvious flag explained inline
 scripts/create_vc_gpu.py    the verified createVc, incl. the commented gpuImage.override block
 scripts/verify_gpu_vc.sh    confirm gpuAccelerationEnabled, queue quota, node GPU capacity
-probes/                     the differential image probe that established the blocker
+probes/                     the differential image probe that established blocker 1
+docs/oss-rapids-vs-cloudera-spark.md  the build-range evidence for blocker 2
 docs/rapids-spark-conf.md   Spark RAPIDS configuration and the version-lock matrix
+docs/cde-pvc-prerequisites.md         DE role + keytab onboarding, both easy to miss
 ```
