@@ -65,6 +65,15 @@ java.lang.NoSuchMethodError: 'void org.apache.spark.rdd.MapPartitionsRDD.<init>(
   at com.nvidia.spark.rapids.GpuExec.doExecuteColumnar(GpuExec.scala:341)
 ```
 
+Recorded in job runs **3 and 4** (unpatched image `cde-rapids-runtime`), in **`driver/stdout`** —
+the Java frames trail a `Py4JJavaError` on `collectToPython`, so they are on stdout, not stderr.
+Prefer run 4 when citing it: run 3 carries the unrelated 1 GiB executor-sizing artefact.
+Runs 5 and 6 are the patched image; run 6 is the success.
+
+```bash
+cde --config-profile <profile> run logs --id 4 --type driver/stdout --follow=false
+```
+
 **Because the parameter is defaulted, recompiling the unmodified upstream source fixes it** — the
 compiler supplies the default and emits the 8-arg call by itself. No RAPIDS logic changes. Exactly
 **2 classes of 17,833** in the jar call that constructor. Full reasoning, provenance and verification:

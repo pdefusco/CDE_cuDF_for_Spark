@@ -31,9 +31,18 @@ DISCOVERY=/opt/cde/gpu/getGpusResources.sh
 # `spark.executor.memory=1g` despite the conf. Confs CDE has no spec field for (memoryOverhead,
 # extraClassPath, the rapids.* keys) survive — and extraClassPath is appended to, not overwritten.
 #
-# --driver-memory is not cosmetic here. At the 1g default the driver JVM, the RAPIDS plugin and the
-# PySpark Python process share a ~2 GiB pod cap; the driver is then cgroup-OOM-killed, which leaves
-# NO Java stack trace — the log simply stops mid-stream. That is what killed run 3.
+# --driver-memory is not cosmetic: at the 1g default the driver JVM, the RAPIDS plugin and the PySpark
+# Python process share a ~2 GiB pod cap, and a cgroup-OOM-killed driver leaves NO Java stack trace —
+# the log simply stops mid-stream, which is near-undiagnosable.
+#
+# CORRECTION (verified against the retained run logs): that is NOT what killed run 3. Run 3 and run 4
+# both died of the Blocker-2 linkage error (NoSuchMethodError on MapPartitionsRDD.<init>), and both
+# shut down cleanly — shutdown hooks ran, a Python traceback was printed, and the only exception in
+# either run's logs is the NoSuchMethodError. A cgroup kill does neither. No run in this cluster's
+# history (1-6) shows OOM evidence. What run 3 *does* prove is the --conf override itself: its
+# ResourceProfile logged executor memory=1024 despite `--conf spark.executor.memory=8g`, where run 4
+# logged 8192 after moving sizing to the native flags below. The sizing lesson stands; the OOM
+# attribution was wrong.
 #
 # Note: the CLI flag is --config-profile, not --profile.
 exec cde --config-profile "$PROFILE" spark submit "$JOB_FILE" \

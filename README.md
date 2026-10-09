@@ -129,8 +129,11 @@ The version-lock matrix (jar ↔ shim ↔ shuffle manager ↔ Spark patch versio
 `docs/rapids-spark-conf.md`.
 
 **Sizing must go through CDE's native flags, not `--conf`** — CDE applies its job spec after merging
-`--conf`, so `--conf spark.executor.memory=8g` is silently replaced by the spec default of 1g. And a 1g
-driver is cgroup-OOM-killed with no Java stack trace: the log just stops.
+`--conf`, so `--conf spark.executor.memory=8g` is silently replaced by the spec default of 1g.
+Confirmed in the logs: run 3's `ResourceProfile` recorded executor `memory=1024` despite the conf,
+where run 4 recorded `8192` after the same sizing moved to the native flags. Keep the driver off the
+1g default too — a cgroup-OOM-killed driver leaves no Java stack trace at all, the log simply stops,
+which is near-undiagnosable. (No run here actually hit that; it is a hazard, not an observation.)
 
 ## 5. Gotchas
 
@@ -215,6 +218,17 @@ java.lang.NoSuchMethodError: 'void org.apache.spark.rdd.MapPartitionsRDD.<init>(
   at org.apache.spark.rapids.LocationPreservingMapPartitionsRDD.<init>(…:44)
   at com.nvidia.spark.rapids.GpuExec.doExecuteColumnar(GpuExec.scala:341)
 ```
+
+**Provenance:** job runs **3 and 4**, both on the unpatched `cde-rapids-runtime` image. The trace
+lands in **`driver/stdout`**, not `driver/stderr` — it arrives as a `Py4JJavaError` on
+`collectToPython`, so the Java frames follow the Python traceback on stdout. Retrieve it with:
+
+```bash
+cde --config-profile <profile> run logs --id 4 --type driver/stdout --follow=false
+```
+
+Run 4 is the better artifact of the two: same trace, but with sizing already corrected, so the
+executor memory is 8 GiB rather than the 1 GiB of run 3 and there is no second variable in the log.
 
 ### What Cloudera changed
 
