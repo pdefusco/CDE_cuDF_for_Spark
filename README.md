@@ -472,4 +472,5 @@ docs/oss-rapids-vs-cloudera-spark.md  the build-range evidence for blocker 2
 docs/linkage-scan.md        how much else is broken: 4,473 refs scanned, 16 misses, 1 reachable
 docs/rapids-spark-conf.md   Spark RAPIDS configuration and the version-lock matrix
 docs/cde-pvc-prerequisites.md         DE role + keytab onboarding, both easy to miss
+docs/slides.md              two leadership slides: highlights, and the proposed productized patch
 ```
