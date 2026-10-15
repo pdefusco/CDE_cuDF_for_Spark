@@ -40,6 +40,7 @@ problem. Cloudera's own older Spark links against OSS RAPIDS fine:
 | Cloudera `3.5.1.1.23.7218.0-28` | 7.2.18 / 1.23 | 7 args — **links** |
 | Cloudera `3.5.4.1.25.731.0-41` | 7.3.1 / 1.25 — **what CAI runs** | not yet measured; see below |
 | Cloudera `3.5.4.1.26.732.0-45` | 7.3.2 / 1.26 — **this cluster** | 8 args — **fails** |
+| Cloudera `3.5.4.127.354.7191000.0-30` | 7.1.9 SP2 CHF4 / 1.27 | 7 args — **links** (measured, smoke test passed; [`runtime-719.md`](runtime-719.md)) |
 | Apache 3.5.4, 3.5.5, 3.5.6, 3.5.7 | — | 7 args |
 | Apache 4.0.0, 4.0.1 | — | 7 args |
 

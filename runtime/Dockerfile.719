@@ -1,0 +1,38 @@
+# CDE custom runtime for Runtime 7.1.9 (CDE 1.27.0-b693 on Data Services 1.5.5 SP4): the stock CDE
+# Spark 3.5.4 runtime + the OSS Spark RAPIDS jar, UNMODIFIED.
+#
+# Unlike the 7.3.2 build (Dockerfile), there is no patcher stage. The 7.1.9 Spark in this base,
+# spark-core_2.12-3.5.4.127.354.7191000.0-30, keeps the upstream 7-arg MapPartitionsRDD constructor
+# (RDD, Function3, ZZZ, ClassTag, ClassTag). The 6th `isDeterministic: Option[Boolean]` parameter that
+# broke OSS RAPIDS is specific to 7.3.2's 3.5.4.1.26.732.0-45, so the OSS jar links as published.
+# Applying the patch here would be harmful: recompiled against this spark-core it emits the 7-arg call
+# again, and Dockerfile's own assertion fails the build.
+#
+# Same rules as Dockerfile otherwise: stay on the CDE runtime base, build --platform linux/amd64.
+
+ARG BASE=docker-private.infra.cloudera.com/cloudera/dex/dex-spark-runtime-3.5.4-7.1.9.1078:1.27.0-b693
+FROM ${BASE}
+
+USER root
+
+# Build-time assertion, the mirror image of Dockerfile's: the unpatched jar is only valid while the
+# base keeps the upstream constructor. If a later 7.1.9 base picks up the extra Option parameter,
+# fail here and switch to the patched build instead of failing at the first GPU action at runtime.
+RUN set -eu; \
+    javap -cp "$(ls /opt/spark/jars/spark-core_*.jar)" -p org.apache.spark.rdd.MapPartitionsRDD \
+      | grep -q 'MapPartitionsRDD(.*boolean, boolean, boolean, scala.reflect.ClassTag' \
+      || { echo "FATAL: base MapPartitionsRDD lacks the upstream 7-arg ctor; use the patched Dockerfile" >&2; exit 1; }; \
+    echo "upstream MapPartitionsRDD ctor OK"
+
+# /opt/spark/jars, NOT /opt/spark/optional-lib, for the same reason as Dockerfile: RapidsShuffleManager
+# must resolve while the executor is still starting up. Same filename, so
+# scripts/submit_rapids_smoke_test.sh works against either image.
+COPY rapids-4-spark_2.12-26.02.0-cuda12.jar /opt/spark/jars/rapids-4-spark_2.12-26.02.0-cuda12.jar
+COPY getGpusResources.sh /opt/cde/gpu/getGpusResources.sh
+
+RUN chmod 0755 /opt/cde/gpu/getGpusResources.sh \
+ && chown -R 1345:0 /opt/cde/gpu \
+ && chown 1345:0 /opt/spark/jars/rapids-4-spark_2.12-26.02.0-cuda12.jar
+
+# Back to the CDE uid. CDE rejects a runtime image that would run as root.
+USER 1345

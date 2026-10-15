@@ -5,13 +5,18 @@
 #   1. The custom runtime resource exists:
 #        cde resource create --name cde-rapids-runtime --type custom-runtime-image \
 #          --image pauldefusco/cde-rapids-runtime-3.5.4:26.02.0 --image-engine spark3
+#      On Runtime 7.1.9 / CDE 1.27 use the unpatched image instead (docs/runtime-719.md):
+#        --name cde-rapids-runtime-719 --image pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-7.1.9
 #   2. The CDE user holds a **DE resource role**. Authentication succeeding is not enough: with no DE
 #      role every call returns `authorization policy denies` and dex-authz logs
 #      "user: <name> does not have any DE roles". Fix is an IAM grant, not a VC ACL change:
 #        cdp iam assign-user-resource-role --user <userCrn> \
 #          --resource-role-crn crn:altus:iam:us-west-1:altus:resourceRole:DEAdmin \
 #          --resource-crn <environmentCrn>
+#      dex-authz caches roles for 5 minutes, so the denial outlives a correct grant by up to that long.
 #   3. The VC was created with `dexapp.api.gpuAcceleration.enabled:true` (create-time only).
+#   4. The user has onboarded a Kerberos keytab in CDE, or every run fails in seconds with
+#      "keytab is not present for user <user>". See docs/cde-pvc-prerequisites.md.
 #
 # Sizing here is deliberately smaller than docs/rapids-spark-conf.md: that block is tuned for a
 # 250M-row ETL, this is a smoke test whose only job is to prove Gpu* operators appear in the plan.

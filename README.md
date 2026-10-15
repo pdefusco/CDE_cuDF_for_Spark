@@ -25,10 +25,19 @@ cluster's own `spark-core`, using the CDE base image as its own toolchain, and s
 ➡ Why the patch is legitimate and what it does *not* cover:
 [`runtime/README-patch.md`](runtime/README-patch.md)
 
+**On Runtime 7.1.9 (CDE 1.27) only blocker 1 applies.** Cloudera's 7.1.9 Spark
+(`3.5.4.127.354.7191000.0-30`) keeps Apache's 7-arg `MapPartitionsRDD` constructor, so the OSS RAPIDS
+jar links unmodified. Build `runtime/Dockerfile.719`, which is the same custom runtime without the
+patcher stage. The smoke test passes there with the same 8 `Gpu*` operators.
+➡ [`docs/runtime-719.md`](docs/runtime-719.md)
+
 Internal technical prototype, not a supported configuration. The runtime image contains a modified
 third-party artifact.
 
 ## 1. Environment
+
+Sections 1–9 describe the Runtime 7.3.2 cluster below. The 7.1.9 cluster (DS 1.5.5 SP4, CM 7.13.2 SP2,
+CDE 1.27.0-b693, the same 3 × `g5.8xlarge`) is described in [`docs/runtime-719.md`](docs/runtime-719.md).
 
 | | |
 |---|---|
@@ -313,6 +322,7 @@ and the patch would become a no-op — better to fail the build than ship that.
 | Cloudera `3.5.1.1.23.7218.0-28` | 7.2.18 / 1.23 | 7 args — links |
 | Cloudera `3.5.4.1.25.731.0-41` | 7.3.1 / 1.25 (what CAI runs) | 7 args — inferred¹ |
 | Cloudera `3.5.4.1.26.732.0-45` | **7.3.2 / 1.26 (here)** | **8 args — fails** |
+| Cloudera `3.5.4.127.354.7191000.0-30` | 7.1.9 SP2 CHF4 / 1.27 | 7 args — links, measured² |
 | Apache 3.5.4–3.5.7, 4.0.0, 4.0.1 | — | 7 args |
 
 So the parameter entered in the Cloudera 7.3.2/1.26 line. This reconciles a real contradiction worth
@@ -323,6 +333,11 @@ successfully, on `3.5.4.1.25.731.0-41`. Same dependencies, different Spark build
 broken call sits in `GpuExec.doExecuteColumnar`, which **every** GPU operator inherits. An 8-arg ctor
 there would fail every GPU query on 1.25 too. Note this is the *only* measured difference between the
 1.25 and 1.26 Spark builds — `FileScan` and `InSubqueryExec`, checked on both, are identical.
+
+² Read with `javap` from the CDE 1.27 base image, and confirmed by the unpatched OSS jar passing the
+smoke test on that cluster ([`docs/runtime-719.md`](docs/runtime-719.md)). The 7.3.2 `Dockerfile`
+must **not** be used there: its patched classes recompile to the 7-arg call, so its own assertion fails
+the build. `runtime/Dockerfile.719` asserts the opposite.
 
 Also ruled out rather than assumed: **no OSS RAPIDS release can fix this**, because the 8-arg
 constructor exists in no Apache Spark release, so NVIDIA has never had a Spark to compile it against.
@@ -438,6 +453,10 @@ upgrade changes `spark-core`, so the image must be rebuilt — and the build ass
 whether the patch is still needed at all. A RAPIDS upgrade means re-extracting the two sources at the
 matching upstream tag. Neither is hard; both are mandatory.
 
+Runtime 7.1.9 shows the lock cutting both ways. Its Spark `3.5.4.127.354.7191000.0-30` needs **no**
+patch, and the patched image is wrong there. Pick the Dockerfile by the `spark-core` in the base image,
+not by the Spark version number: both builds report 3.5.4.
+
 ## 9. Next steps and alternatives
 
 **Re-run the probe after any registry, entitlement, or CDE version change** —
@@ -474,6 +493,8 @@ the action ran on**, then assert `isFinalPlan=true` — details in
 ```
 docs/custom-gpu-runtime.md  ** the end-to-end runbook: versions, Docker + CDE CLI, verified output
 runtime/Dockerfile          the custom runtime: two-stage, recompiles 2 RAPIDS classes in-image
+runtime/Dockerfile.719      the Runtime 7.1.9 / CDE 1.27 variant: unpatched OSS jar, no patcher stage
+docs/runtime-719.md         the 7.1.9 result: versions, ctor evidence, steps, verified output
 runtime/README-patch.md     why the patch is legitimate, its provenance, and its limits
 runtime/patch/*.scala       the two unmodified upstream NVIDIA sources that get recompiled
 jobs/rapids_smoke_test.py   proves plugin load, GPU visibility, and Gpu* operators in the final plan
@@ -485,6 +506,6 @@ docs/gpu-image-availability.md        blocker 1 in full: the probe, its reasonin
 docs/oss-rapids-vs-cloudera-spark.md  the build-range evidence for blocker 2
 docs/linkage-scan.md        how much else is broken: 4,473 refs scanned, 16 misses, 1 reachable
 docs/rapids-spark-conf.md   Spark RAPIDS configuration and the version-lock matrix
-docs/cde-pvc-prerequisites.md         DE role + keytab onboarding, both easy to miss
+docs/cde-pvc-prerequisites.md         DE role, keytab onboarding, proxy 421: all block every job
 docs/slides.md              two leadership slides: highlights, and the proposed productized patch
 ```
