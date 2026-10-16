@@ -27,7 +27,8 @@ cluster's own `spark-core`, using the CDE base image as its own toolchain, and s
 [`runtime/README-patch.md`](runtime/README-patch.md)
 
 Blocker 2 is specific to this Spark build. On Runtime 7.1.9 the OSS jar links unmodified; see
-[`README-719.md`](README-719.md).
+[`README-719.md`](README-719.md) for the install guide and
+[`.internal/README-719.md`](.internal/README-719.md) for how that was established.
 
 Internal technical prototype, not a supported configuration. The runtime image contains a modified
 third-party artifact.
@@ -330,7 +331,7 @@ there would fail every GPU query on 1.25 too. Note this is the *only* measured d
 1.25 and 1.26 Spark builds — `FileScan` and `InSubqueryExec`, checked on both, are identical.
 
 ² Read with `javap` from the CDE 1.27 base image, and confirmed by the unpatched OSS jar passing the
-smoke test on that cluster ([`README-719.md`](README-719.md)). The 7.3.2 `Dockerfile`
+smoke test on that cluster ([`.internal/README-719.md`](.internal/README-719.md)). The 7.3.2 `Dockerfile`
 must **not** be used there: its patched classes recompile to the 7-arg call, so its own assertion fails
 the build. `runtime/Dockerfile.719` asserts the opposite.
 

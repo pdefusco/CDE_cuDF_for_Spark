@@ -1,121 +1,186 @@
-# CDE cuDF for Spark on Runtime 7.1.9 / CDE 1.27
+# GPU-accelerated Spark on CDE: Cloudera Private Cloud with Runtime 7.1.9
 
-← [Overview and other versions](README.md) · Runtime 7.3.2: [`README-732.md`](README-732.md)
+← [Overview and other versions](README.md)
 
-The same work as [`README-732.md`](README-732.md), repeated on a Private Cloud built on Runtime 7.1.9
-instead of 7.3.2. The question was whether the custom runtime **and** the `MapPartitionsRDD` patch
-carry over.
+This guide sets up a Cloudera Data Engineering (CDE) virtual cluster that runs Spark SQL and DataFrame
+jobs on NVIDIA GPUs, using the open-source [NVIDIA RAPIDS Accelerator for Apache
+Spark](https://nvidia.github.io/spark-rapids/). The accelerator ships in a **CDE custom runtime
+image**: CDE's own Spark runtime with the RAPIDS jar added. Each job opts in by naming that image, and
+jobs that don't name it are unaffected.
 
-**Outcome: working, with no patch.** The custom runtime carries over with the same structure, but the
-patch does not apply. Cloudera's 7.1.9 Spark keeps Apache's 7-arg `MapPartitionsRDD` constructor, so
-the **OSS RAPIDS jar links as published**. `runtime/Dockerfile.719` is the 7.3.2 image minus the
-patcher stage. The smoke test passed on the first run that reached the executors. It ran on an A10G,
-with 8 `Gpu*` operators in the final plan and no `NoSuchMethodError`.
+> **Support status.** This is a tested reference configuration, not a Cloudera-supported one. Validate
+> it against your own workloads before relying on it.
 
-Internal technical prototype, not a supported configuration. Unlike the 7.3.2 image, this one ships
-the third-party RAPIDS jar unmodified.
+## 1. Tested versions
 
-## 1. Environment
-
-| | |
+| Component | Version |
 |---|---|
-| Private Cloud | Data Services 1.5.5 SP4 (ECS) |
+| Cloudera Private Cloud Data Services | 1.5.5 SP4 (Embedded Container Service) |
 | Cloudera Manager | 7.13.2 SP2 |
-| Runtime | 7.1.9 SP2 CHF4 (`7.1.9.20400`), Kafka on ZooKeeper |
-| CDE | 1.27.0-b693 |
-| CDE Spark runtime base | `dex-spark-runtime-3.5.4-7.1.9.1078:1.27.0-b693` |
-| `spark-core` | `spark-core_2.12-3.5.4.127.354.7191000.0-30.jar` |
-| Scala / JDK / uid | 2.12.18 / 17.0.20.1 / 1345 (`sparkuser`) |
-| GPU workers | 3 × `g5.8xlarge`, 1× NVIDIA A10G each |
-| Worker OS / arch | RHEL 9.6, **amd64** |
-| RAPIDS | `rapids-4-spark_2.12-26.02.0-cuda12.jar`, `spark354` shim, **unmodified** |
-| Image | `pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-7.1.9` |
-| CDE resource | `cde-rapids-runtime-719` |
-| Virtual cluster | `cuDFforSpark` |
+| Cloudera Runtime | 7.1.9 SP2 CHF4 (`7.1.9.20400`) |
+| Cloudera Data Engineering | 1.27.0-b693 |
+| CDE Spark runtime base image | `dex-spark-runtime-3.5.4-7.1.9.1078:1.27.0-b693` |
+| Spark | 3.5.4 (`spark-core_2.12-3.5.4.127.354.7191000.0-30`), Scala 2.12.18, JDK 17 |
+| NVIDIA RAPIDS Accelerator | `rapids-4-spark_2.12-26.02.0-cuda12.jar`, unmodified, `spark354` shim |
+| GPU hosts | 3 × AWS `g5.8xlarge`, 1 × NVIDIA A10G (24 GB) each, RHEL 9.6, x86-64 |
 
-Read the base image off the live VC rather than guessing it. It is the `image` key in the VC's
-`dex.yaml`:
+**Use these exact versions together.** The RAPIDS jar version, its shim (`spark354`) and the CDE
+Spark build are locked to one another. On another CDE or Runtime version, check the `spark-core` jar
+in your base image first; see [Other versions](#8-other-versions).
 
-```bash
-kubectl get cm <vcId>-api-cm -n <vcId> -o jsonpath='{.data.dex\.yaml}' | grep -E '^\s*(image|gpuImage):'
-```
+## 2. Prerequisites
 
-Note that the Scala version differs from the 7.3.2 base (2.12.19). That matters only if you ever need
-the patcher here.
+**Cluster**
 
-## 2. The finding: the ctor is upstream's
+- ECS GPU nodes with the NVIDIA driver installed, and each worker advertising `nvidia.com/gpu` to
+  Kubernetes. Step 3.1 checks this.
+- A CDE service on the Private Cloud environment.
+- Shell access to the ECS master host, with `jq` installed. Steps 3.1 and 3.4 run there.
 
-`javap` inside the 7.1.9 base:
+**User**
 
-```
-public org.apache.spark.rdd.MapPartitionsRDD(org.apache.spark.rdd.RDD<T>,
-    scala.Function3<org.apache.spark.TaskContext, java.lang.Object, scala.collection.Iterator<T>, scala.collection.Iterator<U>>,
-    boolean, boolean, boolean, scala.reflect.ClassTag<U>, scala.reflect.ClassTag<T>);
-```
+Without both of these, **every** CDE job fails, GPU or not:
 
-| Spark build | Runtime / CDE | ctor |
-|---|---|---|
-| Cloudera `3.5.4.127.354.7191000.0-30` | **7.1.9 SP2 CHF4 / 1.27** | **7 args, links** |
-| Cloudera `3.5.4.1.26.732.0-45` | 7.3.2 / 1.26 | 8 args (`scala.Option` isDeterministic), fails |
+- A **DE resource role** (for example `DEAdmin`) on the environment, granted in Cloudera IAM. A
+  virtual-cluster ACL is not enough. Role changes can take up to 5 minutes to take effect.
+- A **Kerberos keytab uploaded to CDE**: virtual cluster → **Actions** → **Upload User Keytab**.
 
-So the extra `isDeterministic` parameter belongs to the 7.3.2 line. It is not in 7.1.9's Spark 3.5.4
-build. This is the same build-window conclusion as
-[`docs/oss-rapids-vs-cloudera-spark.md`](docs/oss-rapids-vs-cloudera-spark.md), with one more data
-point.
+Symptoms and fixes for both: [`docs/cde-pvc-prerequisites.md`](docs/cde-pvc-prerequisites.md).
 
-**Do not reuse the 7.3.2 `Dockerfile` here.** Recompiled against this `spark-core`, the two patched
-classes emit the 7-arg call again. The patch would be a no-op, and the build's own `javap -c`
-assertion fails by design. `Dockerfile.719` carries the mirror-image assertion instead. It fails the
-build if a later 7.1.9 base ever picks up the 8-arg constructor, which is the signal to switch back to
-the patched build.
+**Workstation**
 
-The linkage scan in [`docs/linkage-scan.md`](docs/linkage-scan.md) was run against the 7.3.2 jars.
-It has **not** been repeated against 7.1.9. The smoke test only proves the `MapPartitionsRDD` path.
+- Docker, able to build `linux/amd64` images. On Apple Silicon this is a cross-build; no emulation is
+  needed, because the image build only copies files.
+- Login access to the registry that hosts the CDE base image. For a connected install this is
+  `container.repository.cloudera.com`, with your Cloudera license credentials.
+- A container registry that the ECS cluster can pull from, to host the custom image.
+- The CDP CLI, configured for your Private Cloud control plane, and `pip install cdpy`.
+- The CDE CLI, configured against the virtual cluster's **Jobs API URL** (available after step 3.3).
+- This repository, cloned locally.
 
-## 3. Steps
+## 3. Create a GPU-enabled virtual cluster
 
-### 3.1 GPU virtual cluster (same as 7.3.2)
+### 3.1 Check that the workers expose GPUs
 
-These steps are unchanged from [`README-732.md`](README-732.md) §3, which explains each one:
+On the ECS master host (ECS's `kubectl` is
+`sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml`):
 
 ```bash
-cdp de update-service --cluster-id <clusterId> --gpu-requests 3
-python scripts/create_vc_gpu.py --cluster-id <clusterId> --name cuDFforSpark
+kubectl get nodes -o json | jq -r '.items[] |
+  "\(.metadata.name) gpu=\(.status.allocatable["nvidia.com/gpu"] // "none") taints=\(.spec.taints // "NONE")"'
+```
+
+Expect `gpu=1` (or more) on each GPU worker. If the GPU workers have no taints, no pod tolerations are
+needed.
+
+### 3.2 Give the CDE service a GPU quota
+
+```bash
+cdp de list-services                       # note the clusterId, e.g. cluster-xxxxxxxx
+cdp de update-service --cluster-id <clusterId> --gpu-requests <totalGpus>
+```
+
+This updates the service in place; it does not need recreating.
+
+### 3.3 Create the virtual cluster with the API, not the console
+
+> **GPU acceleration can only be set when a virtual cluster is created.** A virtual cluster created
+> in the console gets `gpuAccelerationEnabled: false`, and the setting cannot be changed afterwards.
+> In that state GPU jobs run on the CPU without any error. Create the virtual cluster with the script
+> below.
+
+```bash
+python scripts/create_vc_gpu.py --cluster-id <clusterId> --name <vcName>
+```
+
+The script enables `dexapp.api.gpuAcceleration.enabled`. It sets the virtual cluster's GPU ceiling to
+3 and its **guaranteed** GPU requests to `0`, which is required. Before creating, edit `gpuRequests`
+and the CPU and memory values in `build_request()` to fit your cluster. Add `--dry-run` to print the
+request without sending it. Installation takes about 3 minutes; poll with
+`cdp de describe-vc --cluster-id <clusterId> --vc-id <vcId>`.
+
+### 3.4 Verify the virtual cluster
+
+On the ECS master host:
+
+```bash
 scripts/verify_gpu_vc.sh <vcId>
 ```
 
-The rules that cost a recreate if they are missed apply here too: GPU settings are create-only, a
-console-built VC gets `gpuAccelerationEnabled: false`, and `guaranteedGpuRequests` must be 0. See
-[`README-732.md`](README-732.md) §5.
+The script uses ECS's RKE2 `kubectl` through `sudo` by default; set `KUBECTL=...` to override that.
 
-### 3.2 Build, push, register, submit
+It must print `gpuAccelerationEnabled: true`. It also shows the GPU limit of the virtual cluster's
+queue, and the runtime images the virtual cluster uses. Note the `image:` line, because step 4.2
+builds on that image.
+
+## 4. Build and register the custom runtime
+
+### 4.1 Download the RAPIDS jar
 
 ```bash
 cd runtime
 curl -fL --retry 3 -O \
   https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/26.02.0/rapids-4-spark_2.12-26.02.0-cuda12.jar
-
-docker build --platform linux/amd64 -f Dockerfile.719 \
-  -t pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-7.1.9 .
-docker push pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-7.1.9
-cd ..
-
-cde --config-profile <profile> resource create \
-  --name cde-rapids-runtime-719 --type custom-runtime-image --image-engine spark3 \
-  --image pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-7.1.9
-
-CDE_PROFILE=<profile> RUNTIME_RESOURCE=cde-rapids-runtime-719 ./scripts/submit_rapids_smoke_test.sh
-cde --config-profile <profile> run logs --id <runId> --type driver/stdout --follow=false
 ```
 
-The build prints `upstream MapPartitionsRDD ctor OK` from the assertion. The jar keeps the same
-in-image path and filename as the 7.3.2 image, so `submit_rapids_smoke_test.sh` needs no edits; only
-the resource name changes. Sizing goes through CDE's native flags, not `--conf`, for the reason given
-in [`README-732.md`](README-732.md) §4. The script already does this.
+The `cuda12` build includes cuDF and the CUDA runtime libraries, so the image needs no CUDA toolkit
+and no NVIDIA base image. It needs an NVIDIA driver on the hosts that supports CUDA 12.
 
-## 4. Verified output
+### 4.2 Build and push
 
-Run 2, `succeeded`, runtime resource `cde-rapids-runtime-719`:
+Set `BASE` to the `image:` value from step 3.4, which is the CPU Spark runtime your virtual cluster
+already uses:
+
+```bash
+BASE=container.repository.cloudera.com/cdp-private/cloudera/dex/dex-spark-runtime-3.5.4-7.1.9.1078:1.27.0-b693
+IMAGE=<your-registry>/cde-rapids-runtime-3.5.4:26.02.0-7.1.9
+
+docker login "${BASE%%/*}"   # the registry that hosts BASE
+docker build --platform linux/amd64 -f Dockerfile.719 --build-arg BASE="$BASE" -t "$IMAGE" .
+docker push "$IMAGE"
+cd ..
+```
+
+The build prints `upstream MapPartitionsRDD ctor OK`. If it fails with `FATAL: base MapPartitionsRDD
+lacks the upstream 7-arg ctor`, the base image is not the Spark build this guide covers; see
+[Other versions](#8-other-versions).
+
+`Dockerfile.719` adds three things to the base image:
+
+- the RAPIDS jar, in `/opt/spark/jars/`;
+- the GPU discovery script, at `/opt/cde/gpu/getGpusResources.sh`;
+- ownership changes for both files.
+
+It keeps the CDE base image and its non-root user (uid 1345), which CDE requires of a custom runtime.
+
+### 4.3 Register the image with CDE
+
+```bash
+cde resource create --name cde-rapids-runtime-719 \
+  --type custom-runtime-image --image-engine spark3 --image "$IMAGE"
+```
+
+We tested with a public registry. For a private registry, first create a Docker credential with
+`cde credential create --type docker-basic`, then pass it with `--image-credential <name>`. This path
+has not been tested here.
+
+## 5. Run the smoke test
+
+The smoke test checks that each query is planned on the GPU, not just that the job finishes. RAPIDS
+falls back to the CPU silently, so a green job proves nothing by itself. The test fails unless the
+**final** physical plan contains `Gpu*` operators.
+
+```bash
+CDE_PROFILE=<cdeCliProfile> RUNTIME_RESOURCE=cde-rapids-runtime-719 \
+  ./scripts/submit_rapids_smoke_test.sh
+
+cde --config-profile <cdeCliProfile> run logs --id <runId> --type driver/stdout --follow=false
+```
+
+Always set `CDE_PROFILE`, because the script's default profile name is specific to our test
+environment.
+
+Expected output (trimmed):
 
 ```
   host=rapids-smoke-test-…-exec-1  gpu=0, NVIDIA A10G
@@ -141,35 +206,69 @@ VERDICT
   PASS: RAPIDS executed operators on the GPU.
 ```
 
-This is the same plan shape as run 6 on 7.3.2, with no CPU operator below `GpuColumnarToRow`. Run 1
-never reached Spark; it failed the keytab pre-flight (§5).
+## 6. Run your own jobs on the GPU
 
-## 5. What got in the way (none of it GPU-related)
+Use [`scripts/submit_rapids_smoke_test.sh`](scripts/submit_rapids_smoke_test.sh) as the template.
+Every job needs the custom runtime (`--runtime-image-resource-name cde-rapids-runtime-719`) and these
+settings:
 
-Each of these blocked **all** jobs, not just GPU ones. Each is written up in full in
-[`docs/cde-pvc-prerequisites.md`](docs/cde-pvc-prerequisites.md).
+| Setting | Value |
+|---|---|
+| `spark.plugins` | `com.nvidia.spark.SQLPlugin` |
+| `spark.rapids.sql.enabled` | `true` |
+| `spark.rapids.shims-provider-override` | `com.nvidia.spark.rapids.shims.spark354.SparkShimServiceProvider` |
+| `spark.shuffle.manager` | `com.nvidia.spark.rapids.spark354.RapidsShuffleManager` |
+| `spark.kryo.registrator` | `com.nvidia.spark.rapids.GpuKryoRegistrator` |
+| `spark.driver.extraClassPath`, `spark.executor.extraClassPath` | `/opt/spark/jars/rapids-4-spark_2.12-26.02.0-cuda12.jar` |
+| `spark.executor.resource.gpu.amount` | `1` |
+| `spark.executor.resource.gpu.vendor` | `nvidia.com` |
+| `spark.executor.resource.gpu.discoveryScript` | `/opt/cde/gpu/getGpusResources.sh` |
+| `spark.task.resource.gpu.amount` | `1 / executor cores`, e.g. `0.25` for 4 cores |
+| `spark.executor.memoryOverhead` | generous, e.g. `6g`; RAPIDS host memory is off-heap |
 
-- **`421 Misdirected Request` on every VC endpoint.** This is a fault in the deployment's Caddy reverse
-  proxy, not in CDE. Caddy sent the bare CDE service domain as the upstream TLS SNI while forwarding
-  the VC hostname as `Host`, and ingress-nginx rejects any request where the two differ. The fix is
-  `tls_server_name {http.request.host}` in the wildcard site's `transport http` block. It is fixed in
-  the deployment repo's `cloudera_cde.caddyfile.j2`.
-- **`authorization policy denies`.** The DE resource role was missing, the same as on 7.3.2. Two
-  things were different this time:
-  - `cdp iam` went to the public control plane, so the grant went through `cdpcurl` instead.
-  - The grant took about 5 minutes to take effect, because `dex-authz` caches roles.
-- **`keytab is not present for user admin`.** Same as on 7.3.2. On CDE 1.27 the upload is under the
-  virtual cluster's **Actions** menu. Generating the keytab on FreeIPA has a salt pitfall: `ktutil`
-  needs `-f`.
+**Size the driver and executors with CDE's own flags** (`--driver-memory`, `--executor-memory`,
+`--executor-cores`), not with `--conf spark.executor.memory=…`. CDE applies its job defaults after
+`--conf`, so those values are silently replaced with 1g.
 
-## 6. Still open on 7.1.9
+While tuning, add `--conf spark.rapids.sql.explain=NOT_ON_GPU`. RAPIDS then logs every operator it
+left on the CPU, with the reason. For production sizing guidance, see
+[`docs/rapids-spark-conf.md`](docs/rapids-spark-conf.md).
 
-- **Is Cloudera's own GPU image pullable here?** The VC's `dex.yaml` names
-  `container.repository.cloudera.com/cdp-private/cloudera/dex/dex-spark-runtime-gpu-3.5.4-7.1.9.1078:1.27.0-b693`
-  as `gpuImage`, but its pullability was **not** probed on this cluster. The custom runtime was used
-  regardless, and it is the only route verified here. To check, run `probes/probe_images.sh` against
-  this VC. The script is hardcoded to the 7.3.2 cluster's worker and build tag, so edit those first.
-  If the image pulls, try it before maintaining a custom image.
-- **Linkage beyond `MapPartitionsRDD`**: not re-scanned; see §2.
-- **The real workload.** As on 7.3.2, the smoke test proves linkage and plan conversion, not a
-  250M-row Hive ETL ([`README-732.md`](README-732.md) §8).
+## 7. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `authorization policy denies` on every call | No DE resource role | Grant one in IAM, then wait up to 5 minutes ([prerequisites §1](docs/cde-pvc-prerequisites.md)) |
+| Runs fail within seconds: `keytab is not present for user …` | No keytab uploaded | Virtual cluster → Actions → Upload User Keytab ([prerequisites §2](docs/cde-pvc-prerequisites.md)) |
+| Job succeeds, but the plan has no `Gpu*` operators | `gpuAccelerationEnabled: false`, or a missing setting from §6 | Run `verify_gpu_vc.sh`. If the flag is false, recreate the virtual cluster with `create_vc_gpu.py`. |
+| Executor pod stays `Pending` | GPU quota exhausted or not set | Check the service quota (§3.2), the virtual cluster ceiling, and other running GPU jobs |
+| `NoSuchMethodError: …MapPartitionsRDD.<init>` | The image was built on a different Spark build | Rebuild on the 7.1.9 base (§4.2); see §8 |
+| `docker build` fails at the ctor check | `BASE` is not the 7.1.9 Spark build | Use the `image:` value from `verify_gpu_vc.sh` |
+
+## 8. Other versions
+
+Runtime 7.3.2 / CDE 1.26 ships a Spark build that the published RAPIDS jar cannot link against. That
+version needs `runtime/Dockerfile` instead, which patches the jar; see [`README-732.md`](README-732.md).
+`Dockerfile.719` checks for the correct build when the image is built, so a mismatch fails the build
+and does not reach a running job. To check any other base image yourself:
+
+```bash
+docker run --rm --platform linux/amd64 --entrypoint bash "$BASE" -c \
+  'javap -cp "$(ls /opt/spark/jars/spark-core_*.jar)" -p org.apache.spark.rdd.MapPartitionsRDD | grep "MapPartitionsRDD("'
+```
+
+If the constructor ends `boolean, boolean, boolean, scala.reflect.ClassTag<U>, scala.reflect.ClassTag<T>)`,
+`Dockerfile.719` applies.
+
+## 9. Known limitations
+
+- **Validated with the smoke test only.** The test shows that RAPIDS loads, executors see the GPU, and
+  aggregation, shuffle and projection run on it. It has not been benchmarked against a production
+  workload on this version.
+- **Only the RAPIDS ↔ Spark link point that failed on 7.3.2 has been checked here.** A different Spark
+  internal used by an operator the smoke test does not exercise could still fail at runtime. If a job
+  fails with `NoSuchMethodError` or `NoSuchFieldError`, report the stack trace.
+- **Cloudera's built-in GPU runtime image was not evaluated.** The virtual cluster's configuration names
+  `dex-spark-runtime-gpu-3.5.4-7.1.9.1078:1.27.0-b693`. If it is available to your entitlement, it may
+  be an alternative to a custom image.
+- **x86-64 only.** The image is built for `linux/amd64`.

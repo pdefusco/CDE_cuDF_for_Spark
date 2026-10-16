@@ -14,7 +14,7 @@ Internal technical prototype, not a supported configuration.
 
 | | **Runtime 7.3.2** | **Runtime 7.1.9** |
 |---|---|---|
-| Write-up | ➡ [`README-732.md`](README-732.md) | ➡ [`README-719.md`](README-719.md) |
+| Write-up | ➡ [`README-732.md`](README-732.md) | ➡ [`README-719.md`](README-719.md) (install guide) · [engineering notes](.internal/README-719.md) |
 | Private Cloud | CE 1.5.5-h3000 | Data Services 1.5.5 SP4 |
 | Cloudera Manager | 7.13.2.6 | 7.13.2 SP2 |
 | Runtime | 7.3.2.0 | 7.1.9 SP2 CHF4 (`7.1.9.20400`) |
@@ -76,7 +76,8 @@ deployment, the reverse proxy may also need an SNI fix. All three are in
 
 ```
 README-732.md               Runtime 7.3.2 / CDE 1.26: both blockers, the patch, limits, next steps
-README-719.md               Runtime 7.1.9 / CDE 1.27: no patch needed; versions, steps, verified output
+README-719.md               Runtime 7.1.9 / CDE 1.27 install guide: tested versions, steps, troubleshooting
+.internal/README-719.md     Runtime 7.1.9 engineering notes: why no patch is needed, comparison with 7.3.2
 runtime/Dockerfile          7.3.2 custom runtime: two-stage, recompiles 2 RAPIDS classes in-image
 runtime/Dockerfile.719      7.1.9 custom runtime: unpatched OSS jar, no patcher stage
 runtime/README.md           which Dockerfile, fetching the jar, building
