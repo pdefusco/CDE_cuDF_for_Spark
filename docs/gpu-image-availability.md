@@ -1,6 +1,6 @@
 # Why CDE 1.26's own GPU runtime images could not be used
 
-Background detail for README §6. The short version is in the README; this file holds the evidence, so
+Background detail for `README-732.md` §6. The short version is there; this file holds the evidence, so
 that the claim stays **checkable** and the probe stays **re-runnable** after any registry, entitlement,
 or CDE version change.
 

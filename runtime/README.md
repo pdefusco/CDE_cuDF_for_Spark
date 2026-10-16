@@ -17,7 +17,7 @@ Spark version alone does not tell you which one you have.
 
 Each one asserts its own constructor shape at build time and fails on the wrong base. So picking the
 wrong one breaks the build rather than the first GPU job. Details: [`README-patch.md`](README-patch.md)
-for 7.3.2, [`../docs/runtime-719.md`](../docs/runtime-719.md) for 7.1.9.
+for 7.3.2, [`../README-719.md`](../README-719.md) for 7.1.9.
 
 ## Why there is no CUDA base image here
 

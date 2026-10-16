@@ -5,7 +5,7 @@
 #   1. The custom runtime resource exists:
 #        cde resource create --name cde-rapids-runtime --type custom-runtime-image \
 #          --image pauldefusco/cde-rapids-runtime-3.5.4:26.02.0 --image-engine spark3
-#      On Runtime 7.1.9 / CDE 1.27 use the unpatched image instead (docs/runtime-719.md):
+#      On Runtime 7.1.9 / CDE 1.27 use the unpatched image instead (README-719.md):
 #        --name cde-rapids-runtime-719 --image pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-7.1.9
 #   2. The CDE user holds a **DE resource role**. Authentication succeeding is not enough: with no DE
 #      role every call returns `authorization policy denies` and dex-authz logs

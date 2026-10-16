@@ -28,7 +28,7 @@ GPU_CHART_OVERRIDES = " ".join(
         #   {{ .Values.dexapp.api.sparkRuntime.gpuImage.override | default (printf ...) }}
         # so these two point it at an arbitrary image instead. Both are chart values, i.e.
         # CREATE-TIME ONLY — uncomment them in *this* call rather than discovering later
-        # that they cost another recreate. See README section 7.
+        # that they cost another recreate. See README-732.md section 9 and docs/gpu-image-availability.md.
         # "dexapp.api.sparkRuntime.gpuImage.override:<registry>/<repo>:<tag>",
         # "dexapp.api.livyRuntime.gpuImage.override:<registry>/<repo>:<tag>",
     ]

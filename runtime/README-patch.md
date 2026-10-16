@@ -26,7 +26,7 @@ Cloudera-fork-wide one, is in [`../docs/oss-rapids-vs-cloudera-spark.md`](../doc
 **This patch is for 7.3.2 only.** Runtime 7.1.9's Spark (`3.5.4.127.354.7191000.0-30`, CDE 1.27)
 keeps the upstream 7-arg constructor. There the OSS jar links as published, and `Dockerfile.719`
 ships it unmodified. Building this `Dockerfile` against the 7.1.9 base fails at step 3 below, which is
-the intended behaviour. See [`../docs/runtime-719.md`](../docs/runtime-719.md).
+the intended behaviour. See [`../README-719.md`](../README-719.md).
 
 ## Why recompiling is enough — and why it is not a code change
 

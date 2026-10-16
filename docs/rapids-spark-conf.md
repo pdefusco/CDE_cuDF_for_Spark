@@ -1,6 +1,6 @@
 # Spark RAPIDS configuration for CDE
 
-Not yet validated on CDE — the GPU runtime image cannot be pulled (README section 6). This records the
+Not yet validated on CDE — the GPU runtime image cannot be pulled (`README-732.md` section 6). This records the
 configuration that is **known to work on Spark 3.5.4** from prior Spark RAPIDS work on Cloudera AI, plus
 the three things that must change for CDE. Keeping it written down avoids rediscovering the version
 lock the hard way.

@@ -1,7 +1,7 @@
 # Slides: Spark RAPIDS on CDE
 
 Two slides for a mixed / leadership audience. Bullets go on the slide; speaker notes carry the detail.
-Every figure comes from `README.md` §§6–9, `runtime/README-patch.md` and `docs/linkage-scan.md`.
+Every figure comes from `README-732.md` §§6–9, `runtime/README-patch.md` and `docs/linkage-scan.md`.
 
 ---
 

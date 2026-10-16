@@ -6,7 +6,7 @@ CDE resource, and submit a GPU job. No virtual-cluster recreate, no Cloudera ent
 image.
 
 This exists because CDE 1.26's own GPU runtime images are not published to any registry this cluster
-can reach (`README.md` §6) **and** the OSS RAPIDS jar cannot link against Cloudera's Spark unmodified.
+can reach (`README-732.md` §6) **and** the OSS RAPIDS jar cannot link against Cloudera's Spark unmodified.
 The second problem is the one this document solves.
 
 Internal technical prototype. The image contains a modified third-party artifact — see

@@ -1,6 +1,6 @@
 # How much else is broken? A jar-wide linkage scan
 
-Background detail for README §8.
+Background detail for `README-732.md` §8.
 
 The patch in `runtime/` fixes **one** `NoSuchMethodError`. The obvious next question is whether it is
 the only one, or the first of many. Guessing is cheap and worthless in both directions — "it's one
