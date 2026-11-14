@@ -8,27 +8,32 @@ RAPIDS plugin added, registered as a `custom-runtime-image` resource and selecte
 query has run end-to-end on an NVIDIA A10G on two CDP versions so far. Each one is verified by an
 `isFinalPlan=true` plan containing 8 `Gpu*` operators and no CPU operator below `GpuColumnarToRow`.
 
+The same plugin also runs on a **Private Cloud Base cluster without CDE**, with Spark 3 on YARN and
+the jar passed per job with `--jars`. There it ran five benchmark queries entirely on the GPU, 4.5×
+faster than the CPU, but only in a session with Iceberg removed. See
+[`README-719-base.md`](README-719-base.md).
+
 Internal technical prototype, not a supported configuration.
 
 ## Results by version
 
-| | **Runtime 7.3.2** | **Runtime 7.1.9** |
-|---|---|---|
-| Write-up | ➡ [`README-732.md`](README-732.md) | ➡ [`README-719.md`](README-719.md) (install guide) · [engineering notes](.internal/README-719.md) |
-| Private Cloud | CE 1.5.5-h3000 | Data Services 1.5.5 SP4 |
-| Cloudera Manager | 7.13.2.6 | 7.13.2 SP2 |
-| Runtime | 7.3.2.0 | 7.1.9 SP2 CHF4 (`7.1.9.20400`) |
-| CDE | 1.26.0-b557 | 1.27.0-b693 |
-| Cloudera Spark build | `3.5.4.1.26.732.0-45` | `3.5.4.127.354.7191000.0-30` |
-| `MapPartitionsRDD` ctor | 8 args (Cloudera-added `isDeterministic`) | 7 args (upstream) |
-| OSS RAPIDS 26.02.0 jar | **does not link**: patched (2 classes recompiled) | links **unmodified** |
-| Dockerfile | `runtime/Dockerfile` | `runtime/Dockerfile.719` |
-| Image tag | `26.02.0-p1` | `26.02.0-7.1.9` |
-| Verified | job run 6, 8 `Gpu*` operators | job run 2, 8 `Gpu*` operators |
-| GPU workers | 3 × `g5.8xlarge`, 1× A10G each | same |
+| | **Runtime 7.3.2** | **Runtime 7.1.9** | **Base 7.1.9 SP1, Spark on YARN** |
+|---|---|---|---|
+| Write-up | ➡ [`README-732.md`](README-732.md) | ➡ [`README-719.md`](README-719.md) (install guide) · [engineering notes](.internal/README-719.md) | ➡ [`README-719-base.md`](README-719-base.md) (install guide) · [engineering notes](.internal/README-719-base.md) |
+| Private Cloud | CE 1.5.5-h3000 | Data Services 1.5.5 SP4 | Base only, no Data Services |
+| Cloudera Manager | 7.13.2.6 | 7.13.2 SP2 | 7.13.2 SP2 |
+| Runtime | 7.3.2.0 | 7.1.9 SP2 CHF4 (`7.1.9.20400`) | 7.1.9 SP1 + PATCH-1069 (`p1069`) |
+| CDE | 1.26.0-b557 | 1.27.0-b693 | none: SPARK3 parcel on YARN |
+| Cloudera Spark build | `3.5.4.1.26.732.0-45` | `3.5.4.127.354.7191000.0-30` | `3.5.4.3.5.7191000.0-30` |
+| `MapPartitionsRDD` ctor | 8 args (Cloudera-added `isDeterministic`) | 7 args (upstream) | 7 args, inferred from the GPU plans running; not checked with `javap` |
+| OSS RAPIDS jar | 26.02.0 **does not link**: patched (2 classes recompiled) | 26.02.0 links **unmodified** | 26.10.0 links **unmodified**; the session must not load Iceberg |
+| Dockerfile | `runtime/Dockerfile` | `runtime/Dockerfile.719` | none: `--jars` per job |
+| Image tag | `26.02.0-p1` | `26.02.0-7.1.9` | n/a |
+| Verified | job run 6, 8 `Gpu*` operators | job run 2, 8 `Gpu*` operators | 5-query benchmark, all `Gpu*`, 4.5× vs CPU |
+| GPU workers | 3 × `g5.8xlarge`, 1× A10G each | same | 3 × `g5.4xlarge`, 1× A10G each |
 
-The short version: **the custom runtime is the approach on both. The jar patch is a 7.3.2 artifact
-only.**
+The short version: **the custom runtime is the approach on both CDE versions. The jar patch is a
+7.3.2 artifact only.** On Base there is no image at all; the catch there is Iceberg, not linkage.
 
 ## The two blockers, and which version has them
 
@@ -78,6 +83,9 @@ deployment, the reverse proxy may also need an SNI fix. All three are in
 README-732.md               Runtime 7.3.2 / CDE 1.26: both blockers, the patch, limits, next steps
 README-719.md               Runtime 7.1.9 / CDE 1.27 install guide: tested versions, steps, troubleshooting
 .internal/README-719.md     Runtime 7.1.9 engineering notes: why no patch is needed, comparison with 7.3.2
+README-719-base.md          Base 7.1.9 SP1, Spark 3 on YARN (no CDE) guide: YARN GPU setup, settings, benchmark
+.internal/README-719-base.md  Base engineering notes: the four requirements, the Iceberg probe, CDE comparison
+base/                       Base scripts, run on a Spark 3 gateway: check_cluster, plugin_load, benchmark, summary, diagnose
 runtime/Dockerfile          7.3.2 custom runtime: two-stage, recompiles 2 RAPIDS classes in-image
 runtime/Dockerfile.719      7.1.9 custom runtime: unpatched OSS jar, no patcher stage
 runtime/README.md           which Dockerfile, fetching the jar, building
