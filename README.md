@@ -26,7 +26,7 @@ Internal technical prototype, not a supported configuration.
 | Where Spark runs | CDE 1.26.0-b557 | CDE 1.27.0-b693 | YARN, from the SPARK3 parcel (CDS 3.5.4); no CDE |
 | Cloudera Spark build | `3.5.4.1.26.732.0-45` | `3.5.4.127.354.7191000.0-30` | `3.5.4.3.5.7191000.0-30` |
 | RAPIDS jar | 26.02.0, **patched**: 2 classes recompiled against Cloudera's Spark | 26.02.0, unmodified | 26.10.0, unmodified. 26.02.0 fails DataSource V2 writes here |
-| Does the stock jar link? | No. Cloudera's Spark adds an 8th parameter (`isDeterministic`) to the `MapPartitionsRDD` constructor | Yes. Upstream 7-parameter constructor | Yes. 7-parameter constructor, inferred from the GPU plans running (not checked with `javap`) |
+| Does the stock jar link? | No. Cloudera's Spark adds a parameter (`isDeterministic`) to the `MapPartitionsRDD` constructor, which then takes 8 arguments in bytecode instead of 7 | Yes. Upstream 7-argument constructor | Yes. 7-argument constructor, inferred from the GPU plans running (not checked with `javap`) |
 | How the jar gets to the job | Custom runtime image `pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-p1`, from `runtime/Dockerfile` | Custom runtime image `pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-7.1.9`, from `runtime/Dockerfile.719` | `--jars` on each job; no image |
 | Iceberg | No Iceberg jars in the CDE 1.26 image | Not checked | Works, on the CPU, with `suppressPlanningFailure=true`; otherwise the session must not load Iceberg |
 | What was verified | Smoke test (CDE job run 6): 8 `Gpu*` operators in the final plan | Smoke test (CDE job run 2): 8 `Gpu*` operators in the final plan | 5-query benchmark: every query fully on the GPU, 4.5× faster than the CPU |
