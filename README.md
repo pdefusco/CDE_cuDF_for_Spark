@@ -154,6 +154,7 @@ jobs/rapids_smoke_test.py   proves plugin load, GPU visibility, and Gpu* operato
 scripts/submit_rapids_smoke_test.sh   the submit, with every non-obvious flag explained inline
 scripts/create_vc_gpu.py    the verified createVc, incl. the commented gpuImage.override block
 scripts/verify_gpu_vc.sh    confirm gpuAccelerationEnabled, queue quota, node GPU capacity
+scripts/check_spark_core.sh does a Spark build need the patch? javap on spark-core from a jar, image, host or parcel
 probes/                     the differential image probe behind problem 2 (no usable GPU image)
 docs/custom-gpu-runtime.md  the 7.3.2 end-to-end runbook: versions, Docker + CDE CLI, verified output
 docs/gpu-image-availability.md        problem 2 in full: the probe, its reasoning, the chart hatch
