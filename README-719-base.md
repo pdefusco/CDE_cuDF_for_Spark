@@ -12,8 +12,12 @@ and opts in with a handful of settings, and jobs that don't are unaffected.
 > Cloudera documents RAPIDS support only for CDS 3.3. Validate it against your own workloads before
 > relying on it.
 
-**In short:** no Spark patch is needed, but the plugin does not run as-is. It needs four settings
-(§6), and one of them is a real limitation: **a RAPIDS session cannot also use Iceberg** (§5).
+**In short:** no Spark patch is needed, but the plugin does not run as-is. It needs three settings
+(§6), plus one choice about Iceberg (§5). CDS 3.5.4 enables Iceberg 1.3 in every session, and RAPIDS
+fails every DataSource V2 operation when it sees that Iceberg. Iceberg tables and the `noop` sink are
+both DataSource V2. Either let those queries fall back to the CPU (`suppressPlanningFailure=true`,
+recommended), or run RAPIDS jobs with a client config that has no Iceberg. Parquet files and Hive
+tables run on the GPU either way.
 
 ## 1. Tested versions
 
@@ -23,7 +27,7 @@ and opts in with a handful of settings, and jobs that don't are unaffected.
 | Cloudera Runtime | 7.1.9 SP1 (`7.1.9-1.cdh7.1.9.p1069.74330271`) |
 | Spark 3 parcel | `SPARK3-3.5.4.3.5.7191000.0-30-1.p0.68499982` |
 | Spark | `spark.version` = `3.5.4.3.5.7191000.0-30`, Scala 2.12.18, OpenJDK 17.0.21 |
-| NVIDIA RAPIDS Accelerator | `rapids-4-spark_2.12-26.10.0-cuda12.jar`, unmodified, `spark354` shim |
+| NVIDIA RAPIDS Accelerator | `rapids-4-spark_2.12-26.10.0-cuda12.jar`, unmodified, `spark354` shim (26.02.0 partly, see §11) |
 | GPU hosts | 3 × AWS `g5.4xlarge`, 1 × NVIDIA A10G (24 GB) each, driver 620.70.06, RHEL 9.6, x86-64 |
 | YARN | Kerberized; per NodeManager 48 GB, 14 vcores, `yarn.io/gpu` = 1 |
 
@@ -96,19 +100,45 @@ YARN allocates the GPU to the container; Spark still needs the discovery script 
 [`base/plugin_load.sh`](base/plugin_load.sh) does both of these steps, then shows the plugin being
 rejected as-is and loading with the shim override.
 
-## 5. Create a Spark 3 client config without Iceberg
+## 5. Choose how RAPIDS sessions handle Iceberg
 
 CDS 3.5.4's client config (`/etc/spark3/conf`) enables Iceberg 1.3 for every session: it sets the
 Iceberg SQL extensions, makes Iceberg's `SparkSessionCatalog` the `spark_catalog`, and puts the
-Iceberg jars on the classpath through `classpath.txt`. With that config, RAPIDS 26.10 fails **every**
-DataSource V2 read or write, not only Iceberg tables:
+Iceberg jars on the classpath through `classpath.txt`. RAPIDS 26.10 supports only Iceberg 1.6 and
+later. With the stock config, it fails **every** DataSource V2 read or write, whether or not an
+Iceberg table is involved:
 
 ```
 java.lang.UnsupportedOperationException: Unrecognized Iceberg version: d38e7d2d800a1c64b01edc974cf1eabefdc62231
 ```
 
-`spark.rapids.sql.format.iceberg.enabled=false` does not prevent it. Give RAPIDS jobs a private copy of
-the config with Iceberg removed instead:
+DataSource V1 operations are unaffected. These include Parquet, ORC and CSV paths through
+`spark.read` / `df.write`, and Hive tables through the metastore (`spark.table`, `saveAsTable`,
+`insertInto`). DataSource V2 covers Iceberg tables, `writeTo(...)` and the `noop` sink.
+`spark.rapids.sql.format.iceberg.enabled=false` does not prevent the failure. Pick one of the two
+options below.
+
+### 5a. Keep the stock config and let Iceberg fall back to the CPU (recommended)
+
+```
+--conf spark.rapids.sql.suppressPlanningFailure=true
+```
+
+RAPIDS then logs `WARN GpuOverrideUtil: Failed to apply GPU overrides, falling back on the original
+plan` for the part of the plan that touches Iceberg, and runs it on the CPU. Under adaptive query
+execution (on by default), each query stage is planned separately. Only the stages that read or
+write Iceberg stay on the CPU. Joins, aggregations and sorts after an Iceberg scan still run on the
+GPU. Tested on Iceberg 1.3 tables: create (CTAS), read and append all returned exact results.
+
+Two costs:
+- A query that touches Iceberg and has no shuffle runs entirely on the CPU (for example, a plain CTAS).
+- The setting hides any other GPU planning failure in the same way, and the query silently runs on
+  the CPU. Check the final plan (§7).
+
+### 5b. Give RAPIDS jobs a client config without Iceberg
+
+Use this when RAPIDS jobs don't need Iceberg and you want planning failures to stay visible. Create a
+private copy of the config with Iceberg removed:
 
 ```bash
 conf=/tmp/rapids/conf-noiceberg
@@ -122,14 +152,15 @@ grep -rciE iceberg $conf | grep -v ":0$" || echo "no Iceberg left"
 export SPARK_CONF_DIR=$conf
 ```
 
-Only the jobs that export `SPARK_CONF_DIR` see this config. Everyone else keeps Iceberg. Cloudera
-Manager regenerates `/etc/spark3/conf` when the client config is redeployed, so rebuild the copy
-after any Spark 3 configuration change. [`base/benchmark.sh`](base/benchmark.sh) builds it the same
-way.
+Only the jobs that export `SPARK_CONF_DIR` see this config, and they cannot read Iceberg tables at
+all. Everyone else keeps Iceberg. Cloudera Manager regenerates `/etc/spark3/conf` when the client
+config is redeployed, so rebuild the copy after any Spark 3 configuration change.
+[`base/benchmark.sh`](base/benchmark.sh) builds it the same way.
 
 ## 6. Submit a job on the GPU
 
-With `SPARK_CONF_DIR` from §5 exported:
+With the stock config and option 5a; for option 5b, export `SPARK_CONF_DIR` instead and drop the
+`suppressPlanningFailure` line:
 
 ```bash
 spark3-submit --master yarn --deploy-mode client \
@@ -139,6 +170,7 @@ spark3-submit --master yarn --deploy-mode client \
   --conf spark.rapids.sql.enabled=true \
   --conf spark.rapids.shims-provider-override=com.nvidia.spark.rapids.shims.spark354.SparkShimServiceProvider \
   --conf spark.kryo.registrator=com.nvidia.spark.rapids.GpuKryoRegistrator \
+  --conf spark.rapids.sql.suppressPlanningFailure=true \
   --conf spark.executor.resource.gpu.amount=1 \
   --conf spark.executor.resource.gpu.discoveryScript=./getGpusResources.sh \
   --conf spark.task.resource.gpu.amount=0.08 \
@@ -155,6 +187,7 @@ spark3-submit --master yarn --deploy-mode client \
 | `spark.rapids.sql.enabled` | `true` | |
 | `spark.rapids.shims-provider-override` | `com.nvidia.spark.rapids.shims.spark354.SparkShimServiceProvider` | the plugin rejects Cloudera's version string `3.5.4.3.5.7191000.0-30`; this forces the Apache 3.5.4 shim |
 | `spark.kryo.registrator` | `com.nvidia.spark.rapids.GpuKryoRegistrator` | the CDS client config selects Kryo, and RAPIDS refuses to run under Kryo without its registrator. If a registrator is already set, append this one, comma-separated |
+| `spark.rapids.sql.suppressPlanningFailure` | `true` | option 5a: Iceberg (DataSource V2) stages fall back to the CPU instead of failing the query |
 | `spark.executor.resource.gpu.amount` | `1` | one GPU per executor; YARN schedules it as `yarn.io/gpu` |
 | `spark.executor.resource.gpu.discoveryScript` | `./getGpusResources.sh` | shipped with `--files` |
 | `spark.task.resource.gpu.amount` | `1 / executor cores`, e.g. `0.08` for 12 cores | lets all the executor's tasks share the GPU |
@@ -204,9 +237,12 @@ GpuColumnarToRow
 
 [`base/benchmark.sh`](base/benchmark.sh) generates 300M rows of synthetic Parquet on HDFS (3.4 GB)
 and a 1M-row dimension table, then runs five queries on the GPU and on the CPU. Each query runs once
-to warm up and once timed, writing to the `noop` sink. Both runs used the same executors (3 × 12
-cores), `spark.sql.shuffle.partitions=200`, `maxPartitionBytes=512m` and the Iceberg-free config. The
-CPU run had 22g heap + 4g overhead and no plugin.
+to warm up and once timed. Both runs used the same executors (3 × 12 cores),
+`spark.sql.shuffle.partitions=200` and `maxPartitionBytes=512m`. The CPU run had 22g heap + 4g
+overhead and no plugin.
+
+Each query's result is written to the `noop` sink, which measures the query and not the write. These
+runs used the Iceberg-free config (§5b):
 
 | Query | GPU (s) | CPU (s) | Speedup |
 |---|---:|---:|---:|
@@ -221,17 +257,46 @@ CPU run had 22g heap + 4g overhead and no plugin.
 that probably sits in the OS page cache, so it measures compute more than I/O. `filter` is too short
 to say much about.
 
+With option 5a instead (stock config, `suppressPlanningFailure=true`), only the `noop` write node fell
+back. Every query stage stayed on the GPU: agg 10.0, join 1.3, sort 4.5, window 1.8 and filter 0.7 s.
+
+**Writing Parquet instead** (`SINK=parquet`, stock config, no extra settings): every operator ran on
+the GPU, including `GpuInsertIntoHadoopFsRelationCommand`. The sort query writes all 300M rows.
+
+| Query | GPU (s) | CPU (s) | Speedup |
+|---|---:|---:|---:|
+| agg | 12.2 | 25.1 | 2.1× |
+| join | 1.6 | 4.4 | 2.8× |
+| sort | 19.4 | 39.5 | 2.0× |
+| window | 4.2 | 13.5 | 3.2× |
+| filter | 0.8 | 1.4 | 1.7× |
+| **Total** | **38.2** | **83.9** | **2.2×** |
+
+These timings include HDFS writes and vary from run to run. In three GPU runs, `sort` took 10.5, 19.4
+and 38.7 s.
+
+**Iceberg and Hive tables** ([`base/iceberg_check.sh`](base/iceberg_check.sh), stock config, 30M rows):
+
+| Step | `suppressPlanningFailure=true` | default (`false`) |
+|---|---|---|
+| Iceberg CTAS (`writeTo(...).using("iceberg").create()`) | runs, entirely on the CPU | fails: `Unrecognized Iceberg version` |
+| Iceberg read + two-level aggregation | scan stage on the CPU, aggregation on the GPU; exact checksum | (no table) |
+| Iceberg append (`writeTo(...).append()`) | write on the CPU, the query feeding it on the GPU | (no table) |
+| Hive table: `saveAsTable`, read + aggregation, `insertInto` | all on the GPU; exact checksum | all on the GPU; exact checksum |
+
 To reproduce on your cluster, after §2 and §3:
 
 ```bash
 base/plugin_load.sh   # downloads the jar; as-is load (rejected) vs. shim override
 base/benchmark.sh     # Iceberg-free config, GPU and CPU runs, final plans (~10 min at 300M rows)
+base/iceberg_check.sh # Iceberg and Hive tables with the stock config, suppressPlanningFailure on and off
 base/summary.sh       # re-reads the logs into the table above
 base/diagnose.sh      # if the GPU run fails: config, Iceberg jars, stack traces, log tails
 ```
 
 All four take `RAPIDS_VERSION` (default `26.10.0`) and `WORK` (default `/tmp/rapids`);
-`benchmark.sh` also takes `ROWS`. Its executor sizing assumes the tested hosts; edit the `common`,
+`benchmark.sh` also takes `ROWS`, `RUNS`, `SINK=parquet`, `STOCK_CONF=1` and `GPU_CONF` (see its
+header). Its executor sizing assumes the tested hosts; edit the `common`,
 `gpu` and `cpu` arrays for yours.
 
 ## 9. Troubleshooting
@@ -240,7 +305,9 @@ All four take `RAPIDS_VERSION` (default `26.10.0`) and `WORK` (default `/tmp/rap
 |---|---|---|
 | `IllegalArgumentException: This RAPIDS Plugin build does not support Spark build 3.5.4.3.5.7191000.0-30` | No shim override | Set `spark.rapids.shims-provider-override` (§6) |
 | `The RAPIDS Accelerator when used with Kryo needs to register some serializers` | No Kryo registrator | Set `spark.kryo.registrator` (§6) |
-| `UnsupportedOperationException: Unrecognized Iceberg version: d38e7d2d…` in `GpuOverrideUtil` | The stock client config, with Iceberg | Export the Iceberg-free `SPARK_CONF_DIR` (§5) |
+| `UnsupportedOperationException: Unrecognized Iceberg version: d38e7d2d…` in `GpuOverrideUtil` | A DataSource V2 operation with the stock client config, which has Iceberg | Set `suppressPlanningFailure=true` (§5a) or use the Iceberg-free config (§5b) |
+| `WARN GpuOverrideUtil: Failed to apply GPU overrides, falling back on the original plan` | Expected with option 5a: that part of the plan touches Iceberg | Nothing, if it names `Unrecognized Iceberg version`; anything else is a real planning failure to investigate |
+| `IllegalAccessError: failed to access class org.apache.iceberg.spark.source.SparkWrite from class org.apache.iceberg.spark.source.GpuSparkWrite$` | RAPIDS 26.02.0 with the stock config, on any DataSource V2 write | Use 26.10.0, or the Iceberg-free config (§5b). `suppressPlanningFailure` does not catch it |
 | Submission fails writing `/user/<name>/.sparkStaging` | No HDFS home directory | Create `/user/<name>` (§2) |
 | The application stays `ACCEPTED`, or executors never start | Not enough `yarn.io/gpu`, or no GPUs advertised | Check §3; request no more GPU executors than there are GPUs |
 | `explain()` shows only CPU operators | The plan before AQE re-plans it | Check the final plan after the query (§7) |
@@ -262,14 +329,17 @@ scala.reflect.ClassTag<T>)`, this guide applies; if it has an extra `scala.Optio
 
 ## 11. Known limitations
 
-- **No Iceberg in a RAPIDS session.** RAPIDS 26.10 has Iceberg support only for Iceberg 1.6 and
-  later, and it fails queries rather than falling back when it finds the Iceberg 1.3 that CDS 3.5.4
-  ships. Iceberg tables cannot be read on the GPU or the CPU from the same session. Lifting this
-  needs a change in RAPIDS, not in Spark.
+- **Iceberg runs on the CPU at best.** RAPIDS 26.10 accelerates only Iceberg 1.6 and later. CDS
+  3.5.4 ships 1.3, so with `suppressPlanningFailure=true` (§5a) the stages that read or write Iceberg
+  run on the CPU; without it, they fail. Accelerating them needs RAPIDS support for Iceberg 1.3, not
+  a change in Spark.
+- **RAPIDS 26.02.0 (the version used on CDE) is partly tested.** With the stock config, it ran the
+  Parquet-writing benchmark fully on the GPU. Every DataSource V2 write (Iceberg, `noop`) fails with
+  `IllegalAccessError`, and no setting tried avoids it, including the jar on `extraClassPath` and
+  `suppressPlanningFailure`. Use 26.10.0.
 - **The shim override is an untested combination for NVIDIA.** The driver logs `Overriding Spark
   shims provider ... This may be an untested configuration!`. Five query shapes ran fully on the GPU
   with no errors; that is the extent of the evidence.
-- **Not tested here:** PySpark and UDFs, cluster deploy mode, reads of Hive tables through the
-  metastore, larger data sets and spill, `RapidsShuffleManager`, the `cuda13` jar, and RAPIDS 26.02.0
-  (the version used on CDE).
+- **Not tested here:** PySpark and UDFs, cluster deploy mode, Hive ACID tables, larger data sets and
+  spill, `RapidsShuffleManager`, and the `cuda13` jar.
 - **x86-64 only.** The tested jar classifier is `cuda12` on `amd64`.
