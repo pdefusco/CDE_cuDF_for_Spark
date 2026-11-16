@@ -41,6 +41,8 @@ problem. Cloudera's own older Spark links against OSS RAPIDS fine:
 | Cloudera `3.5.4.1.25.731.0-41` | 7.3.1 / 1.25 — **what CAI runs** | not yet measured; see below |
 | Cloudera `3.5.4.1.26.732.0-45` | 7.3.2 / 1.26 — **this cluster** | 8 args — **fails** |
 | Cloudera `3.5.4.127.354.7191000.0-30` | 7.1.9 SP2 CHF4 / 1.27 | 7 args — **links** (measured, smoke test passed; [`.internal/README-719.md`](../.internal/README-719.md)) |
+| Cloudera `3.5.4.3.5.7191000.0-30` | 7.1.9 SP1 Base, SPARK3 parcel (CDS 3.5) | 7 args — **links** (measured; [`.internal/README-719-base.md`](../.internal/README-719-base.md)) |
+| Cloudera `3.3.2.3.3.7191000.1-126` | 7.1.9 SP1 Base, bundled in the CDH parcel (`p1069`) | 8 args — **fails** (measured) |
 | Apache 3.5.4, 3.5.5, 3.5.6, 3.5.7 | — | 7 args |
 | Apache 4.0.0, 4.0.1 | — | 7 args |
 
@@ -49,8 +51,11 @@ parameter (`$lessinit$greater$default$6`) feeding a new private `defaultMapOutpu
 used by `getOutputDeterministicLevel`. Being defaulted it is source-compatible, so Cloudera's own
 build recompiles cleanly; only **pre-compiled** callers like the RAPIDS jar break.
 
-It appears in **no Apache Spark release**, 3.5.x or 4.x, and not in Cloudera 7.2.18 — so it entered
-in the Cloudera 7.3.2 / 1.26 line.
+It appears in **no Apache Spark release**, 3.5.x or 4.x, and not in Cloudera 7.2.18. It was first
+seen in the Cloudera 7.3.2 / 1.26 line, but it is not specific to that line: the Spark 3.3.2
+maintenance build bundled in the 7.1.9 SP1 CDH parcel has it too, while CDS 3.5.4 GA on the same
+cluster does not. Treat it as a Cloudera backport that lands per build, and check each build with
+[`scripts/check_spark_core.sh`](../scripts/check_spark_core.sh).
 
 ### Why this matters: the CAI comparison
 

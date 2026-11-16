@@ -347,6 +347,26 @@ RAPIDS jar expects Apache Spark's 7-argument version. If yours ends in `boolean,
 scala.reflect.ClassTag<U>, scala.reflect.ClassTag<T>)`, this guide applies. If it has an extra
 `scala.Option` argument, follow [`README-732.md`](README-732.md) instead.
 
+To check every Spark build on a host at once, including parcels that aren't active, run
+[`scripts/check_spark_core.sh`](scripts/check_spark_core.sh) from your workstation. It needs a local
+JDK, not one on the cluster:
+
+```bash
+SSH_OPTS="-q -F <your-ssh-config>" scripts/check_spark_core.sh ssh://<any-cluster-host>
+```
+
+On the cluster in this guide, it found two Spark 3 builds:
+
+| Build | Where | `MapPartitionsRDD` ctor | Stock RAPIDS jar |
+|---|---|---|---|
+| `3.5.4.3.5.7191000.0-30` | SPARK3 parcel (CDS 3.5), which `spark3-submit` runs | 7 args | links |
+| `3.3.2.3.3.7191000.1-126` | bundled in the CDH parcel, `CDH-7.1.9-1.cdh7.1.9.p1069.74330271/jars/` | 8 args | **doesn't link** |
+
+So the version of 7.1.9 doesn't settle it either. Run RAPIDS jobs on CDS 3.5's Spark, and check
+with `spark3-submit --version` that it is the one your gateway uses. The Spark 3.3.2 build has the
+same extra parameter as 7.3.2. Later CDS 3.5 builds for 7.1.9 may pick it up too, so check again
+after a Spark upgrade.
+
 ## 11. Known limitations
 
 - **Iceberg runs on the CPU at best.** RAPIDS 26.10 can only accelerate Iceberg 1.6 and later, and CDS

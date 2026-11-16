@@ -26,7 +26,7 @@ Internal technical prototype, not a supported configuration.
 | Where Spark runs | CDE 1.26.0-b557 | CDE 1.27.0-b693 | YARN, from the SPARK3 parcel (CDS 3.5.4); no CDE |
 | Cloudera Spark build | `3.5.4.1.26.732.0-45` | `3.5.4.127.354.7191000.0-30` | `3.5.4.3.5.7191000.0-30` |
 | RAPIDS jar | 26.02.0, **patched**: 2 classes recompiled against Cloudera's Spark | 26.02.0, unmodified | 26.10.0, unmodified. 26.02.0 fails DataSource V2 writes here |
-| Does the stock jar link? | No. Cloudera's Spark adds a parameter (`isDeterministic`) to the `MapPartitionsRDD` constructor, which then takes 8 arguments in bytecode instead of 7 | Yes. Upstream 7-argument constructor | Yes. 7-argument constructor, inferred from the GPU plans running (not checked with `javap`) |
+| Does the stock jar link? | No. Cloudera's Spark adds a parameter (`isDeterministic`) to the `MapPartitionsRDD` constructor, which then takes 8 arguments in bytecode instead of 7 | Yes. Upstream 7-argument constructor | Yes. 7-argument constructor, checked with `javap` |
 | How the jar gets to the job | Custom runtime image `pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-p1`, from `runtime/Dockerfile` | Custom runtime image `pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-7.1.9`, from `runtime/Dockerfile.719` | `--jars` on each job; no image |
 | Iceberg | No Iceberg jars in the CDE 1.26 image | Not checked | Works, on the CPU, with `suppressPlanningFailure=true`; otherwise the session must not load Iceberg |
 | What was verified | Smoke test (CDE job run 6): 8 `Gpu*` operators in the final plan | Smoke test (CDE job run 2): 8 `Gpu*` operators in the final plan | 5-query benchmark: every query fully on the GPU, 4.5× faster than the CPU |
@@ -70,15 +70,19 @@ Spark adds an extra parameter, with a default value, to the constructor of an in
 `MapPartitionsRDD`. Code compiled against Cloudera's Spark is unaffected. The RAPIDS jar, however,
 was compiled against Apache Spark and calls the old constructor, so every GPU query fails on its first
 action with `NoSuchMethodError`. The fix is to recompile two NVIDIA source files, unchanged, against
-the cluster's own `spark-core`, and put the results in the jar. Runtime 7.1.9's Spark doesn't have the
-extra parameter, so on 7.1.9 the jar works as it is, on CDE and on Base. Details:
-[`docs/oss-rapids-vs-cloudera-spark.md`](docs/oss-rapids-vs-cloudera-spark.md),
+the cluster's own `spark-core`, and put the results in the jar. The Spark 3.5.4 builds tested on
+Runtime 7.1.9 don't have the extra parameter, so there the jar works as it is, on CDE and on Base.
+Details: [`docs/oss-rapids-vs-cloudera-spark.md`](docs/oss-rapids-vs-cloudera-spark.md),
 [`runtime/README-patch.md`](runtime/README-patch.md).
 
-Both Spark builds report themselves as 3.5.4. So on CDE, choose the Dockerfile by checking the
-`spark-core` jar in your base image, not by the version number. Each Dockerfile checks the constructor
-while it builds, so the wrong choice fails the build instead of your first GPU job. See
-[`runtime/README.md`](runtime/README.md).
+This depends on the Spark build, not the Runtime version. The extra parameter isn't limited to 7.3.2:
+the Spark 3.3.2 that the 7.1.9 CDH parcel bundles (`3.3.2.3.3.7191000.1-126`) has it too, while CDS
+3.5.4 on the same cluster doesn't. The builds also don't differ in their version string (both 7.3.2's
+and 7.1.9's report 3.5.4). So check the `spark-core` jar your jobs actually run:
+[`scripts/check_spark_core.sh`](scripts/check_spark_core.sh) reads it from a local jar, a CDE runtime
+image, a cluster host or a parcel URL, and says whether the stock jar links. On CDE, each Dockerfile
+also checks the constructor while it builds, so the wrong choice fails the build instead of your first
+GPU job. See [`runtime/README.md`](runtime/README.md).
 
 **4. On Base, the default Spark config loads Iceberg 1.3.** CDS 3.5.4 turns Iceberg on in every
 session, and RAPIDS 26.10 supports only Iceberg 1.6 and later. When it sees the older Iceberg, it fails

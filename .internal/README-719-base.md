@@ -302,12 +302,24 @@ Seven planning failures were suppressed in the `true` run, all `Unrecognized Ice
 | Kryo registrator | needed | needed |
 | Shuffle manager | Spark's own | `RapidsShuffleManager` |
 | Iceberg | V2 operations fail unless `suppressPlanningFailure=true` or the config has no Iceberg | not hit: the smoke test did no V2 write |
-| `MapPartitionsRDD` ctor | 7 args, inferred (see below) | 7 args, checked with `javap` |
+| `MapPartitionsRDD` ctor | 7 args, checked with `javap` (see below) | 7 args, checked with `javap` |
 | Evidence | 5-query benchmark, all `Gpu*`, 4.5× | smoke test, 8 `Gpu*` operators |
 
-**The ctor was not checked with `javap` on Base.** It is inferred to be the upstream 7-argument one, because every GPU
-plan here ran, while on 7.3.2 every GPU plan dies at its first action with `NoSuchMethodError`.
-`base/check_cluster.sh` now prints it.
+**The ctor is checked with `javap` on Base.** `scripts/check_spark_core.sh ssh://<gateway>` was
+run against every parcel on the gateway on 2026-11-16:
+
+| Build | Where | Ctor |
+|---|---|---|
+| `3.5.4.3.5.7191000.0-30` | `SPARK3-3.5.4.3.5.7191000.0-30-1.p0.68499982/lib/spark3/jars/` | 7 args (upstream) |
+| `3.3.2.3.3.7191000.1-126`, built 2025-10-30 | `CDH-7.1.9-1.cdh7.1.9.p1069.74330271/jars/` | **8 args** (`isDeterministic`) |
+
+The first result confirms what the GPU plans already implied. The second changes the story:
+`isDeterministic` is not a 7.3.2-only change. Cloudera also carries it in the Spark 3.3.2 that the
+7.1.9 CDH parcel bundles, a `.1` maintenance build, while the CDS 3.5.4 GA build (`.0-30`) lacks it.
+So on 7.1.9 the answer depends on which Spark 3 a job runs, and a later CDS 3.5 build for 7.1.9
+could need the patch. That also fits a patch being needed on an earlier hand-built 7.1.9 attempt, if
+it ran the bundled 3.3.2 instead of CDS 3.5 (unconfirmed: the Aug–Sep lab configs on disk all pin
+Runtime 7.3.2).
 
 The Iceberg difference is not Base vs CDE. It comes from what was tested. On Base, both 26.10.0 and
 26.02.0 fail V2 writes with the stock config, and the CDE smoke test never did one. Whether the CDE
@@ -346,7 +358,8 @@ script on stdin. For example, a GPU-only run with the stock config and the Parqu
 
 ## 8. Still open
 
-- **`MapPartitionsRDD` ctor on Base**, by `javap` (§6).
+- **Other Spark builds' ctors**, by `scripts/check_spark_core.sh`: later CDS 3.5 parcels for 7.1.9,
+  7.3.1 (CDE and Base), and 7.3.2 Base.
 - **PySpark**, cluster deploy mode (`spark-submit`, where the shim loader is Spark's child loader
   rather than the REPL's), Hive ACID tables, `RapidsShuffleManager`, larger scale and spill.
 - **A V2 write on CDE 7.1.9 with 26.02.0**, to confirm §3.5 there.

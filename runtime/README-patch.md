@@ -23,10 +23,14 @@ Cloudera added a sixth constructor parameter to `MapPartitionsRDD` in this build
 Full diagnosis, including the build-range evidence showing this is a 7.3.2-window change and not a
 Cloudera-fork-wide one, is in [`../docs/oss-rapids-vs-cloudera-spark.md`](../docs/oss-rapids-vs-cloudera-spark.md).
 
-**This patch is for 7.3.2 only.** Runtime 7.1.9's Spark (`3.5.4.127.354.7191000.0-30`, CDE 1.27)
-keeps the upstream 7-arg constructor. There the OSS jar links as published, and `Dockerfile.719`
-ships it unmodified. Building this `Dockerfile` against the 7.1.9 base fails at step 3 below, which is
-the intended behaviour. See [`../.internal/README-719.md`](../.internal/README-719.md).
+**This patch is for Spark builds with the 8-arg constructor, and has been tested only on 7.3.2's.**
+The Spark 3.5.4 builds tested on Runtime 7.1.9 (`3.5.4.127.354.7191000.0-30` on CDE 1.27,
+`3.5.4.3.5.7191000.0-30` on Base) keep the upstream 7-arg constructor. There the OSS jar links as
+published, and `Dockerfile.719` ships it unmodified. Building this `Dockerfile` against the 7.1.9 base
+fails at step 3 below, which is the intended behaviour. See
+[`../.internal/README-719.md`](../.internal/README-719.md). Whether a build has the 8-arg constructor
+depends on the build, not the Runtime version: the Spark 3.3.2 bundled in the 7.1.9 CDH parcel has it.
+[`../scripts/check_spark_core.sh`](../scripts/check_spark_core.sh) tells you which kind you have.
 
 ## Why recompiling is enough — and why it is not a code change
 
