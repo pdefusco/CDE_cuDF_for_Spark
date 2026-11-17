@@ -83,12 +83,14 @@ enough to trust by reading it.
    its companion has the default-argument methods but not `mapPartitions(...)`, which
    `GpuColumnarToRowExec` calls when it exports a ColumnarRdd (XGBoost and similar).
 
-**The published `26.02.0-p1` image predates a fix to this stage.** Its patcher also overwrote the
-`spark-shared/` companion `GpuColumnToRowMapPartitionsRDD$` with one compiled from `patch/`, which lacks
-the published companion's `mapPartitions(...)`. `GpuColumnarToRowExec` calls that method only when it
-exports a ColumnarRdd (XGBoost and similar), so the smoke test and benchmark never reached it, but on
-that path `p1` fails with `NoSuchMethodError`. The current `Dockerfile` leaves the companions alone.
-Rebuild (for example as `26.02.0-p2`) before using ColumnarRdd.
+**Use `26.02.0-p2`, not `26.02.0-p1`.** The first published image, `p1`, predates a fix to this
+stage. Its patcher also overwrote the `spark-shared/` companion `GpuColumnToRowMapPartitionsRDD$` with
+one compiled from `patch/`, which lacks the published companion's `mapPartitions(...)`.
+`GpuColumnarToRowExec` calls that method only when it exports a ColumnarRdd (XGBoost and similar), so
+the smoke test and benchmark never reached it, but on that path `p1` fails with `NoSuchMethodError`.
+`p2` is built from the current `Dockerfile`, which leaves the companions alone. Inside the `p2` image,
+both companions have the same CRCs as in NVIDIA's jar (`7897ea48`, `3e7725f6`). `p2` has not yet run
+a job on a CDE cluster.
 
 Only the patched jar crosses into the runtime stage, so the unpatched 887 MB copy never lands in a
 layer of the final image.

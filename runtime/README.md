@@ -12,7 +12,7 @@ Spark version alone does not tell you which one you have.
 
 | Dockerfile | Base | `spark-core` | RAPIDS jar | Tag |
 |---|---|---|---|---|
-| `Dockerfile` | `dex-spark-runtime-3.5.4-7.3.2.0:1.26.0-b557` | `3.5.4.1.26.732.0-45` (8-arg ctor) | patched, 2 classes recompiled | `26.02.0-p1` |
+| `Dockerfile` | `dex-spark-runtime-3.5.4-7.3.2.0:1.26.0-b557` | `3.5.4.1.26.732.0-45` (8-arg ctor) | patched, 2 classes recompiled | `26.02.0-p2` (replaces `-p1`) |
 | `Dockerfile.719` | `dex-spark-runtime-3.5.4-7.1.9.1078:1.27.0-b693` | `3.5.4.127.354.7191000.0-30` (7-arg ctor) | OSS, unmodified | `26.02.0-7.1.9` |
 
 Each one asserts its own constructor shape at build time and fails on the wrong base. So picking the

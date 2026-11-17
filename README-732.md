@@ -131,10 +131,10 @@ in [`docs/custom-gpu-runtime.md`](docs/custom-gpu-runtime.md). In short:
 
 ```bash
 cde --config-profile <profile> resource create \
-  --name cde-rapids-runtime-p1 --type custom-runtime-image --image-engine spark3 \
-  --image pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-p1
+  --name cde-rapids-runtime-p2 --type custom-runtime-image --image-engine spark3 \
+  --image pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-p2
 
-RUNTIME_RESOURCE=cde-rapids-runtime-p1 ./scripts/submit_rapids_smoke_test.sh
+RUNTIME_RESOURCE=cde-rapids-runtime-p2 ./scripts/submit_rapids_smoke_test.sh
 ```
 
 The submit script sets every RAPIDS setting the job needs, including the shim override and the Kryo
@@ -326,9 +326,11 @@ The build checks with `javap -c` that both classes, as read back out of the patc
 7-argument call again and the patch would do nothing. It's better for the build to fail than to ship
 that. It also checks that the companion still has `mapPartitions`.
 
-The published `26.02.0-p1` image predates that last check. Its build overwrote the companions too,
-which breaks the ColumnarRdd export path (XGBoost and similar) with a `NoSuchMethodError`. The smoke
-test and benchmark don't use that path. See [`runtime/README-patch.md`](runtime/README-patch.md).
+Job run 6 used the first published image, `26.02.0-p1`, which predates that last check. Its build
+overwrote the companions too, which breaks the ColumnarRdd export path (XGBoost and similar) with a
+`NoSuchMethodError`. The smoke test and benchmark don't use that path. `26.02.0-p2`, used above, is
+built from the fixed `Dockerfile` and checked inside the image, but no CDE job has run on it yet. See
+[`runtime/README-patch.md`](runtime/README-patch.md).
 
 ### It's one range of builds, not all of Cloudera's Spark
 

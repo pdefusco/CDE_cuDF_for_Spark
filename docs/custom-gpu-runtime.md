@@ -32,7 +32,7 @@ release notes. The patch is **specific to the Spark build**, so these matter.
 | **CDE base runtime image** | **`docker-private.infra.cloudera.com/cloudera/dex/dex-spark-runtime-3.5.4-7.3.2.0:1.26.0-b557`** |
 | Same image, as the cluster resolves it | `container.repository.cloudera.com/cdp-private/cloudera/dex/dex-spark-runtime-3.5.4-7.3.2.0:1.26.0-b557` |
 | RAPIDS jar | `com.nvidia:rapids-4-spark_2.12:26.02.0`, `cuda12` classifier |
-| Published runtime image | `pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-p1` |
+| Published runtime image | `pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-p2` (the run in §5 used `-p1`) |
 | CDE service / VC | `cluster-j6th9czl` / `cuDFforSpark` (vcId `qkckw9t9`) |
 | GPU workers | 3 × `g5.8xlarge`, 1× NVIDIA A10G 24 GB each, RHEL 9.6 **amd64**, driver 615.71.09 / CUDA 13.4 |
 
@@ -108,10 +108,10 @@ docker build --platform linux/amd64 \
 docker push pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-p2
 ```
 
-The published image is still `26.02.0-p1`, which the steps below use. It was built before a fix to
-the patcher: its build also overwrote the companion `GpuColumnToRowMapPartitionsRDD$`, dropping the
-`mapPartitions(...)` that the ColumnarRdd export path (XGBoost and similar) calls. A rebuild from the
-current `Dockerfile` as `p2` fixes that; update the tag in the steps below if you push one. See
+The steps below use `26.02.0-p2`. It replaces `26.02.0-p1`, the image the verified run in §5 used.
+`p1` was built before a fix to the patcher: its build also overwrote the companion
+`GpuColumnToRowMapPartitionsRDD$`, dropping the `mapPartitions(...)` that the ColumnarRdd export path
+(XGBoost and similar) calls. `p2` passes the checks below, but no CDE job has run on it yet. See
 [`../runtime/README-patch.md`](../runtime/README-patch.md).
 
 The build is two stages. Stage `patcher` compiles `patch/*.scala` with `scala.tools.nsc.Main` **using
@@ -132,18 +132,21 @@ Do not trust the build's own assertions — re-check inside the finished image:
 
 ```bash
 docker run --rm --platform linux/amd64 --entrypoint bash \
-  pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-p1 -c '
+  pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-p2 -c '
   J=/opt/spark/jars/rapids-4-spark_2.12-26.02.0-cuda12.jar
-  unzip -l $J | grep -E "spark(354|-shared)/.*(LocationPreserving|GpuColumnToRow)MapPartitionsRDD"
-  cd /tmp && unzip -oq $J "spark354/org/apache/spark/rapids/LocationPreservingMapPartitionsRDD.class"
-  javap -c -p spark354/org/apache/spark/rapids/LocationPreservingMapPartitionsRDD.class \
+  unzip -v $J | grep -E "spark(354|-shared)/.*(LocationPreserving|GpuColumnToRow)MapPartitionsRDD"
+  javap -c -p "jar:file:$J!/spark354/org/apache/spark/rapids/LocationPreservingMapPartitionsRDD.class" \
     | grep "MapPartitionsRDD.\"<init>\""
   javap -p -cp /opt/spark/jars/spark-core_2.12-3.5.4.1.26.732.0-45.jar \
     org.apache.spark.rdd.MapPartitionsRDD | head -3'
 ```
 
-Expect 4 jar entries (the two `spark354/` classes and their two `spark-shared/` companions), and the
-call site to match Cloudera's declaration exactly:
+`javap` reads the class straight out of the jar, so nothing is written inside the container. (On a
+full Docker Desktop disk, unzipping to `/tmp` fails with `No space left on device`.)
+
+Expect 4 jar entries: the two `spark354/` classes, and their two `spark-shared/` companions, which
+must keep NVIDIA's CRCs, `7897ea48` (`LocationPreservingMapPartitionsRDD$`) and `3e7725f6`
+(`GpuColumnToRowMapPartitionsRDD$`). Expect the call site to match Cloudera's declaration exactly:
 
 ```
 MapPartitionsRDD."<init>":(Lorg/apache/spark/rdd/RDD;Lscala/Function3;ZZZLscala/Option;Lscala/reflect/ClassTag;Lscala/reflect/ClassTag;)V
@@ -158,16 +161,16 @@ The CLI flag is **`--config-profile`**, not `--config` or `--profile`.
 ```bash
 # 1. Register the image as a custom runtime. --image-engine spark3 is required.
 cde --config-profile ds0928 resource create \
-  --name cde-rapids-runtime-p1 \
+  --name cde-rapids-runtime-p2 \
   --type custom-runtime-image \
   --image-engine spark3 \
-  --image pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-p1
+  --image pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-p2
 
 # 2. Confirm it reached `ready`.
 cde --config-profile ds0928 resource list --filter 'type[eq]custom-runtime-image'
 
 # 3. Submit the smoke test against it.
-RUNTIME_RESOURCE=cde-rapids-runtime-p1 ./scripts/submit_rapids_smoke_test.sh
+RUNTIME_RESOURCE=cde-rapids-runtime-p2 ./scripts/submit_rapids_smoke_test.sh
 
 # 4. Read the verdict.
 cde --config-profile ds0928 run logs --id <runId> --type driver
@@ -178,7 +181,7 @@ load-bearing parts:
 
 ```bash
 cde --config-profile ds0928 spark submit jobs/rapids_smoke_test.py \
-  --runtime-image-resource-name cde-rapids-runtime-p1 \
+  --runtime-image-resource-name cde-rapids-runtime-p2 \
   --driver-memory 4g --executor-memory 8g --executor-cores 4 \
   --conf spark.plugins=com.nvidia.spark.SQLPlugin \
   --conf spark.rapids.sql.enabled=true \
@@ -213,7 +216,7 @@ Four things in there are not obvious:
 
 Resource names: **`cde resource update` can only change ACLs.** There is no way to change the image on
 an existing `custom-runtime-image` resource, so iterating on the image means creating a new resource
-(`-p2`, `-p3`, …) or deleting and recreating. Keeping the old one is the non-destructive choice.
+(`-p3`, `-p4`, …) or deleting and recreating. Keeping the old one is the non-destructive choice.
 
 ---
 

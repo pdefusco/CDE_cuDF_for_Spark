@@ -125,7 +125,8 @@ entry: exactly the two `spark354/` entries may differ.
   companions (4 entries), which dropped `mapPartitions(...)`: a latent `NoSuchMethodError` on the
   ColumnarRdd path in CDE 7.3.2. No CDE test used that path, so nobody hit it. The Dockerfile now
   writes only the two `spark354/` classes and asserts the companion still has `mapPartitions(...)`.
-  The published `26.02.0-p1` image was built before the fix and still has the bug.
+  The `26.02.0-p1` image was built before the fix and still has the bug. `26.02.0-p2` is built
+  from the fixed Dockerfile, and inside it both companions have the CRCs of NVIDIA's jar.
 
 ## 4. Linkage scan
 
@@ -260,8 +261,9 @@ the published name and doesn't download, and writes its own copy of the discover
 
 - **The ColumnarRdd export path** with the patched jar (`ColumnarRdd`, XGBoost): it uses the
   recompiled `GpuColumnToRowMapPartitionsRDD` through the published companion. Untested.
-- **The CDE Dockerfile fix** (§3) hasn't been built: the `26.02.0-p1` image still overwrites the
-  companion. Rebuilding needs the CDE 1.26 base image from Cloudera's private registry.
+- **`26.02.0-p2` on a CDE cluster.** The fixed Dockerfile (§3) is built and pushed as `p2`
+  (`sha256:8180b205cdcd…`) and checked inside the image, but no CDE job has run on it yet. The CDE
+  runs in the repo used `p1`.
 - **Not run on 7.3.2:** stock config with `suppressPlanningFailure=true` on the `noop` sink, `SINK=parquet`,
   RAPIDS 26.02.0, `scripts/check_spark_core.sh` against the gateway (the `javap` in `check_cluster.sh`
   covered the one Spark build in the parcel).
