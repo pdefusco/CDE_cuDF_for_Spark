@@ -50,6 +50,7 @@ the published jar works as it is. On Base that is one script, run once on the ga
 > gets. No GPU node has been started yet, and no RAPIDS query has run.
 
 The goal is the same as for Base: Spark 3 on YARN, with GPU executors on a Data Hub compute group.
+Guide, with the commands and which steps have run: ➡ [`README-732-datahub.md`](README-732-datahub.md).
 
 | | **Data Hub, Runtime 7.3.2 · Data Engineering template · CDP Public Cloud (AWS)** |
 |---|---|
@@ -207,7 +208,7 @@ All three are in [`docs/cde-pvc-prerequisites.md`](docs/cde-pvc-prerequisites.md
 ### On Base (Spark 3 on YARN)
 
 On a Data Hub, steps 1 and 4 work differently and aren't finished. See
-[Work in progress: Data Hub 7.3.2](#work-in-progress-data-hub-732-cdp-public-cloud).
+[`README-732-datahub.md`](README-732-datahub.md) (work in progress).
 
 The full guides are [`README-719-base.md`](README-719-base.md) (7.1.9) and
 [`README-732-base.md`](README-732-base.md) (7.3.2, which adds step 4).
@@ -241,6 +242,9 @@ README-732-base.md          Base 7.3.2, Spark 3 on YARN guide: the 7.1.9 setup p
 .internal/README-732-base.md  Base 7.3.2 engineering notes: the patch, the linkage scan, comparison with the other three
 base/                       Base scripts, run on a Spark 3 gateway: check_cluster, plugin_load, patch_rapids_jar,
                             benchmark, iceberg_check, linkage_scan, summary, diagnose
+README-732-datahub.md       Data Hub 7.3.2 on CDP Public Cloud (work in progress): p4d, driver recipe, the CM role blocker
+datahub/                    Data Hub scripts, run from a workstation: create-datahub, nvidia-gpu-recipe (untested),
+                            cm-yarn-gpu (Cloudera Manager API through Knox)
 runtime/Dockerfile          7.3.2 custom runtime: two-stage, recompiles 2 RAPIDS classes in-image
 runtime/Dockerfile.719      7.1.9 custom runtime: unpatched OSS jar, no patcher stage
 runtime/README.md           which Dockerfile, fetching the jar, building
