@@ -73,8 +73,22 @@ enough to trust by reading it.
    `MapPartitionsRDD."<init>":(…;ZZZLscala/Option;…)V`. **This guard matters:** if a future base
    image drops the parameter, scalac silently emits the 7-arg call again and the patch becomes a
    no-op. Better to fail the build than to ship a silent no-op.
-4. Writes the classes back to the two prefixes RAPIDS loads them from — `spark354/` for the classes,
-   `spark-shared/` for the `$` default-arg companions — then asserts 4 entries landed.
+4. Writes the two classes back to `spark354/`, where a 3.5.4 session loads them from, then reads them
+   back out of the patched jar and repeats the step-3 assert on those copies.
+5. Leaves their `$` companions in `spark-shared/` as published, and asserts that
+   `GpuColumnToRowMapPartitionsRDD$` still has `mapPartitions(...)`. Neither companion calls
+   `MapPartitionsRDD`, and both classes keep their own constructor signature, so the published
+   companions link against the recompiled classes. The `$` class that scalac produces from
+   `patch/GpuColumnToRowMapPartitionsRDD.scala` is *not* equivalent: that file is the class alone, so
+   its companion has the default-argument methods but not `mapPartitions(...)`, which
+   `GpuColumnarToRowExec` calls when it exports a ColumnarRdd (XGBoost and similar).
+
+**The published `26.02.0-p1` image predates a fix to this stage.** Its patcher also overwrote the
+`spark-shared/` companion `GpuColumnToRowMapPartitionsRDD$` with one compiled from `patch/`, which lacks
+the published companion's `mapPartitions(...)`. `GpuColumnarToRowExec` calls that method only when it
+exports a ColumnarRdd (XGBoost and similar), so the smoke test and benchmark never reached it, but on
+that path `p1` fails with `NoSuchMethodError`. The current `Dockerfile` leaves the companions alone.
+Rebuild (for example as `26.02.0-p2`) before using ColumnarRdd.
 
 Only the patched jar crosses into the runtime stage, so the unpatched 887 MB copy never lands in a
 layer of the final image.
@@ -84,20 +98,13 @@ layer of the final image.
 Spark 3 on YARN on Base 7.3.2 (`3.5.4.7.3.2.0-957`, in the CDH parcel) has the same 8-arg
 constructor. There is no image to build, so [`../base/patch_rapids_jar.sh`](../base/patch_rapids_jar.sh)
 does steps 1–3 on the gateway, with the parcel's own `scala-compiler` 2.12.19 against
-`lib/spark3/jars`. It differs from this stage in three ways:
+`lib/spark3/jars`. It differs from this stage in two ways:
 
 - **Source at the jar's own tag.** It fetches both files from `NVIDIA/spark-rapids` at the tag of the
   jar being patched (tested: `v26.10.0`), instead of using the `v26.02.0` copies in `patch/`.
-- **Two entries, not four.** Only the two `spark354/` classes are replaced. The `spark-shared/`
-  companions are left as published: neither calls `MapPartitionsRDD`, and the published
-  `GpuColumnToRowMapPartitionsRDD$` has a `mapPartitions(...)` method, used by the ColumnarRdd export
-  path, that the standalone `GpuColumnToRowMapPartitionsRDD.scala` doesn't define. Step 4 above
-  overwrites it with a companion that lacks the method. That is a latent bug in this `Dockerfile`,
-  reached only by jobs that export GPU data through ColumnarRdd (XGBoost and similar), and not yet
-  fixed here. See [`../.internal/README-732-base.md`](../.internal/README-732-base.md) §3.
 - **More asserts.** Besides the `ZZZLscala/Option;` check, it asserts each class's own constructor
   descriptor and class-file major version (52) are unchanged, and compares CRCs to confirm that only
-  those two entries differ from the published jar.
+  the two `spark354/` entries differ from the published jar.
 
 Install steps are in [`../README-732-base.md`](../README-732-base.md).
 
@@ -138,7 +145,7 @@ drag in most of the plugin; the class itself needs only four imports.
 ## Rebuilding
 
 ```bash
-docker build --platform linux/amd64 -t <user>/cde-rapids-runtime-3.5.4:26.02.0-p1 runtime/
+docker build --platform linux/amd64 -t <user>/cde-rapids-runtime-3.5.4:26.02.0-p2 runtime/
 ```
 
 `--platform linux/amd64` is mandatory: the workers are amd64 RHEL 9.6 and the build host is arm64

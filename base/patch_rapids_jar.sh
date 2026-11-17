@@ -7,7 +7,7 @@
 # This is the patcher stage of runtime/Dockerfile, run on the gateway instead of in an image (see
 # runtime/README-patch.md for why a recompile is enough). The two RAPIDS classes that call the
 # constructor are recompiled, from NVIDIA's source at the jar's own tag, against this host's
-# spark-core, and replace their spark354/ copies. Nothing else in the jar changes. Unlike the
+# spark-core, and replace their spark354/ copies. Nothing else in the jar changes. As in the
 # Dockerfile, the spark-shared/ companions are left as published: neither calls MapPartitionsRDD, and
 # GpuColumnToRowMapPartitionsRDD$ carries mapPartitions (the ColumnarRdd export path), which the
 # standalone class compiled here does not.

@@ -240,11 +240,11 @@ timed, into the `noop` sink.
 
 | | GPU | CPU |
 |---|---|---|
-| Executors | 3 × 12 cores | same |
+| Executors | 3 × 12 cores | 3 × 12 cores |
 | Heap + overhead | 16g + 10g | 22g + 4g |
 | GPU | 1 per executor, `task.resource.gpu.amount=0.08`, `concurrentGpuTasks=2`, pinned pool 2g | none, plugin not loaded |
-| Shuffle | Spark's own, 200 partitions | same |
-| Config | Iceberg-free `SPARK_CONF_DIR` | same |
+| Shuffle | Spark's own, 200 partitions | Spark's own, 200 partitions |
+| Config | Iceberg-free `SPARK_CONF_DIR` | Iceberg-free `SPARK_CONF_DIR` |
 
 | Query | GPU (s) | CPU (s) | Speedup |
 |---|---:|---:|---:|
@@ -285,9 +285,9 @@ aggregation, compared with the same rows read from Parquet: `[30000000,149998500
 | `DESCRIBE` → Provider | `iceberg` | (no table) |
 | Iceberg read + agg | checksum matches; `BatchScan` stage on the CPU → `GpuRowToColumnar` → `GpuHashAggregate` | (no table) |
 | Iceberg append (1000 rows) | OK; `AppendData` on the CPU, the limit query under it on the GPU; count 30001000 | (no table) |
-| Hive `saveAsTable` (Provider `parquet`) | `GpuCreateDataSourceTableAsSelectCommand` | same |
-| Hive read + agg | checksum matches, all on the GPU | same |
-| Hive `insertInto` (1000 rows) | `GpuInsertIntoHadoopFsRelationCommand`; count 30001000 | same |
+| Hive `saveAsTable` (Provider `parquet`) | `GpuCreateDataSourceTableAsSelectCommand` | `GpuCreateDataSourceTableAsSelectCommand` |
+| Hive read + agg | checksum matches, all on the GPU | checksum matches, all on the GPU |
+| Hive `insertInto` (1000 rows) | `GpuInsertIntoHadoopFsRelationCommand`; count 30001000 | `GpuInsertIntoHadoopFsRelationCommand`; count 30001000 |
 
 Seven planning failures were suppressed in the `true` run, all `Unrecognized Iceberg version`.
 

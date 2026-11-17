@@ -102,18 +102,26 @@ curl -sfL https://raw.githubusercontent.com/NVIDIA/spark-rapids/v26.02.0/sql-plu
 
 # 3. Build. --platform is mandatory: workers are amd64, a Mac build host is arm64.
 docker build --platform linux/amd64 \
-  -t pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-p1 .
+  -t pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-p2 .
 
 # 4. Push.
-docker push pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-p1
+docker push pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-p2
 ```
+
+The published image is still `26.02.0-p1`, which the steps below use. It was built before a fix to
+the patcher: its build also overwrote the companion `GpuColumnToRowMapPartitionsRDD$`, dropping the
+`mapPartitions(...)` that the ColumnarRdd export path (XGBoost and similar) calls. A rebuild from the
+current `Dockerfile` as `p2` fixes that; update the tag in the steps below if you push one. See
+[`../runtime/README-patch.md`](../runtime/README-patch.md).
 
 The build is two stages. Stage `patcher` compiles `patch/*.scala` with `scala.tools.nsc.Main` **using
 the base image as its own toolchain** — the CDE runtime already ships `scala-compiler-2.12.19.jar` and
 the exact `spark-core_2.12-3.5.4.1.26.732.0-45.jar`, so there is no question which Spark was on the
-classpath. It then asserts, via `javap`, that both classes emit the 8-arg descriptor, and that 4 entries
-landed in the jar. **Those assertions are the point**: if a future base image drops the parameter,
-scalac silently emits the 7-arg call again and the patch becomes a no-op. The build fails instead.
+classpath. It writes them back to `spark354/` only, then asserts, via `javap` on the copies in the
+patched jar, that both classes emit the 8-arg descriptor and that the published companion
+`GpuColumnToRowMapPartitionsRDD$` still has `mapPartitions(...)`. **Those assertions are the point**:
+if a future base image drops the parameter, scalac silently emits the 7-arg call again and the patch
+becomes a no-op. The build fails instead.
 
 Only the patched jar crosses into stage 2, so the unpatched 887 MB copy never lands in a final layer.
 Expect ~76 s for the patcher stage and ~8.6 GB for the final image.
@@ -134,7 +142,8 @@ docker run --rm --platform linux/amd64 --entrypoint bash \
     org.apache.spark.rdd.MapPartitionsRDD | head -3'
 ```
 
-Expect 4 jar entries, and the call site to match Cloudera's declaration exactly:
+Expect 4 jar entries (the two `spark354/` classes and their two `spark-shared/` companions), and the
+call site to match Cloudera's declaration exactly:
 
 ```
 MapPartitionsRDD."<init>":(Lorg/apache/spark/rdd/RDD;Lscala/Function3;ZZZLscala/Option;Lscala/reflect/ClassTag;Lscala/reflect/ClassTag;)V

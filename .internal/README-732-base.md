@@ -113,15 +113,19 @@ It writes the classes into a copy of the jar with `jar uf`, and compares CRCs of
 entry: exactly the two `spark354/` entries may differ.
 
 **Differences from the CDE Dockerfile.** The Dockerfile works from the 26.02.0 source in
-`runtime/patch/` and also overwrites the `spark-shared/` copies of the companion objects (4 entries).
-The Base script fetches the source at the jar's own tag and leaves `spark-shared/` alone:
+`runtime/patch/`; the Base script fetches the source at the jar's own tag. Both now leave
+`spark-shared/` alone:
 
 - Neither companion calls `MapPartitionsRDD`, so neither needs recompiling.
-- `GpuColumnToRowMapPartitionsRDD$` in the published jar carries `mapPartitions(...)`, used by the
-  ColumnarRdd export path (`InternalColumnarRddConverter`). The standalone file compiled here doesn't
-  define it, so the companion it produces is missing that method. The Dockerfile's overwrite drops it,
-  a latent `NoSuchMethodError` for any CDE 7.3.2 job that uses ColumnarRdd (XGBoost and similar).
-  Nobody has hit it, because no CDE test used that path. Not yet fixed in the Dockerfile.
+- `GpuColumnToRowMapPartitionsRDD$` in the published jar carries `mapPartitions(...)`.
+  `GpuColumnarToRowExec.doExecute` calls it when `exportColumnarRdd` is set, i.e. on the ColumnarRdd
+  export path (XGBoost and similar). The standalone file compiled here doesn't define it, so the
+  companion scalac produces from it lacks that method.
+- **Found here, fixed in the Dockerfile afterwards.** The Dockerfile used to overwrite both
+  companions (4 entries), which dropped `mapPartitions(...)`: a latent `NoSuchMethodError` on the
+  ColumnarRdd path in CDE 7.3.2. No CDE test used that path, so nobody hit it. The Dockerfile now
+  writes only the two `spark354/` classes and asserts the companion still has `mapPartitions(...)`.
+  The published `26.02.0-p1` image was built before the fix and still has the bug.
 
 ## 4. Linkage scan
 
@@ -188,9 +192,9 @@ not be accelerated. `iceberg_check.sh` results, patched jar, stock config, 30M r
 | `DESCRIBE` → Provider | `iceberg` | `TABLE_OR_VIEW_NOT_FOUND` |
 | Iceberg read + agg | checksum matches; `BatchScan` stage on the CPU → `GpuRowToColumnar` → `GpuHashAggregate` | `TABLE_OR_VIEW_NOT_FOUND` |
 | Iceberg append (1000 rows) | OK; `AppendData` on the CPU, the limit query under it on the GPU; count 30001000 | `TABLE_OR_VIEW_NOT_FOUND` |
-| Hive `saveAsTable` (Provider `parquet`) | `GpuCreateDataSourceTableAsSelectCommand` | same |
-| Hive read + agg | checksum matches, all on the GPU | same |
-| Hive `insertInto` (1000 rows) | `GpuInsertIntoHadoopFsRelationCommand`; count 30001000 | same |
+| Hive `saveAsTable` (Provider `parquet`) | `GpuCreateDataSourceTableAsSelectCommand` | `GpuCreateDataSourceTableAsSelectCommand` |
+| Hive read + agg | checksum matches, all on the GPU | checksum matches, all on the GPU |
+| Hive `insertInto` (1000 rows) | `GpuInsertIntoHadoopFsRelationCommand`; count 30001000 | `GpuInsertIntoHadoopFsRelationCommand`; count 30001000 |
 
 Seven planning failures were suppressed in the `true` run, all `Unrecognized Iceberg version`. Step by
 step, this is the 7.1.9 table.
@@ -225,9 +229,9 @@ All five final plans were `Gpu*` operators, with no `NOT_ON_GPU` reasons logged 
 |---|---|---|---|
 | Spark build | `3.5.4.7.3.2.0-957` (CDH parcel) | `3.5.4.3.5.7191000.0-30` (SPARK3 parcel) | `3.5.4.1.26.732.0-45` (CDE 1.26 runtime image) |
 | `MapPartitionsRDD` ctor | 8 args | 7 args | 8 args |
-| RAPIDS | 26.10.0, 2 classes recompiled on the gateway | 26.10.0 as published | 26.02.0, 2 classes recompiled in the runtime image (+2 companions) |
+| RAPIDS | 26.10.0, 2 classes recompiled on the gateway | 26.10.0 as published | 26.02.0, 2 classes recompiled in the runtime image (the published `p1` image also overwrote 2 companions, since fixed) |
 | Shim override, Kryo registrator | needed | needed | set on every run |
-| Iceberg | 1.5.2: `suppressPlanningFailure` or no Iceberg | 1.3: same | no Iceberg jars in the image |
+| Iceberg | 1.5.2: `suppressPlanningFailure` or no Iceberg | 1.3: `suppressPlanningFailure` or no Iceberg | no Iceberg jars in the image |
 | Evidence | 5-query benchmark, 4.2×; Iceberg/Hive check; linkage scan | 5-query benchmark, 4.5×; Iceberg/Hive check | smoke test |
 
 So the patch belongs to the Spark build, not to CDE: whichever channel delivers a Spark with
@@ -256,7 +260,8 @@ the published name and doesn't download, and writes its own copy of the discover
 
 - **The ColumnarRdd export path** with the patched jar (`ColumnarRdd`, XGBoost): it uses the
   recompiled `GpuColumnToRowMapPartitionsRDD` through the published companion. Untested.
-- **The CDE Dockerfile's companion overwrite** (§3): a latent bug in the CDE 7.3.2 image, not yet fixed.
+- **The CDE Dockerfile fix** (§3) hasn't been built: the `26.02.0-p1` image still overwrites the
+  companion. Rebuilding needs the CDE 1.26 base image from Cloudera's private registry.
 - **Not run on 7.3.2:** stock config with `suppressPlanningFailure=true` on the `noop` sink, `SINK=parquet`,
   RAPIDS 26.02.0, `scripts/check_spark_core.sh` against the gateway (the `javap` in `check_cluster.sh`
   covered the one Spark build in the parcel).

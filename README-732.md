@@ -306,9 +306,10 @@ constructor, so it would break on Apache Spark. A recompile has none of those pr
 **The CDE base image has everything needed to build the patch.** That makes it cheap, and it removes
 any doubt about what we compiled against. The image already contains `scala-compiler-2.12.19.jar`
 *and* the exact `spark-core` jar. Compile with `-target:jvm-1.8`, since every class in the RAPIDS jar
-is Java 8 bytecode (major version 52). Then write the output back to both places RAPIDS loads classes
-from: `spark354/` for the classes, and `spark-shared/` for the `$` companion objects that hold the
-default arguments.
+is Java 8 bytecode (major version 52). Then write the two classes back to `spark354/`, where a 3.5.4
+session loads them from. Their `$` companion objects in `spark-shared/` stay as published: they don't
+call `MapPartitionsRDD`, and one of them has a method (`mapPartitions`, for the ColumnarRdd export
+path) that the compiled patch source doesn't.
 
 ### Why only two classes
 
@@ -320,10 +321,14 @@ real classes, plus one compiler-generated companion:
 overrides `getPreferredLocations`; the other adds nothing. Counting the callers *before* estimating the
 work is what showed this could be patched rather than needing a fork.
 
-The build checks with `javap -c` that both classes now make the 8-argument call, and that exactly 4
-patched entries end up in the jar. If a future base image drops the parameter, the compiler would
-quietly produce the 7-argument call again and the patch would do nothing. It's better for the build to
-fail than to ship that.
+The build checks with `javap -c` that both classes, as read back out of the patched jar, now make the
+8-argument call. If a future base image drops the parameter, the compiler would quietly produce the
+7-argument call again and the patch would do nothing. It's better for the build to fail than to ship
+that. It also checks that the companion still has `mapPartitions`.
+
+The published `26.02.0-p1` image predates that last check. Its build overwrote the companions too,
+which breaks the ColumnarRdd export path (XGBoost and similar) with a `NoSuchMethodError`. The smoke
+test and benchmark don't use that path. See [`runtime/README-patch.md`](runtime/README-patch.md).
 
 ### It's one range of builds, not all of Cloudera's Spark
 

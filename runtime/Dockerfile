@@ -38,17 +38,21 @@ WORKDIR /build
 COPY rapids-4-spark_2.12-26.02.0-cuda12.jar ./rapids.jar
 COPY patch/*.scala ./src/
 
-# The jar lays classes out per shim and the synthetic default-arg companions in spark-shared, so
-# replacements must go back to those same two prefixes or the RAPIDS classloader will not find them.
-#   spark354/    <- the classes
-#   spark-shared/ <- the `$` default-arg holders
+# The jar lays classes out per shim, so the two replacements go back to spark354/, where a 3.5.4
+# session loads them from. Their `$` companions live in spark-shared/ and stay as published: neither
+# calls MapPartitionsRDD, and the published GpuColumnToRowMapPartitionsRDD$ has a mapPartitions method
+# (GpuColumnarToRowExec calls it when exporting a ColumnarRdd, e.g. for XGBoost) that the standalone
+# patch/GpuColumnToRowMapPartitionsRDD.scala does not define. Overwriting it, as this stage once did,
+# turned that path into a NoSuchMethodError. Each class keeps its own constructor signature, so the
+# published companions still link against the recompiled classes.
 #
 # Target jvm-1.8 because every existing class in the jar is major version 52; mixing in major 61
 # classes would be a second, self-inflicted linkage problem.
 #
-# The `grep -q` at the end is a build-time assertion, not decoration: if a future base image drops
-# the extra parameter, scalac silently emits the 7-arg call again and the patch becomes a no-op that
-# would otherwise fail opaquely at runtime. Fail the build here instead.
+# The `grep -q` checks are build-time assertions, not decoration: if a future base image drops the
+# extra parameter, scalac silently emits the 7-arg call again and the patch becomes a no-op that
+# would otherwise fail opaquely at runtime. Fail the build here instead. They run against the classes
+# as read back out of the patched jar, and also check the companion still has mapPartitions.
 RUN set -eu; \
     SCALA="/opt/spark/jars/scala-compiler-2.12.19.jar:/opt/spark/jars/scala-library-2.12.19.jar:/opt/spark/jars/scala-reflect-2.12.19.jar"; \
     CP="$(ls /opt/spark/jars/*.jar | tr '\n' ':')"; \
@@ -65,14 +69,24 @@ RUN set -eu; \
     \
     for p in org/apache/spark/rapids/LocationPreservingMapPartitionsRDD \
              org/apache/spark/sql/rapids/execution/GpuColumnToRowMapPartitionsRDD; do \
-      mkdir -p "stage/spark354/$(dirname "$p")" "stage/spark-shared/$(dirname "$p")"; \
-      cp "classes/$p.class"  "stage/spark354/$p.class"; \
-      cp "classes/$p\$.class" "stage/spark-shared/$p\$.class"; \
+      mkdir -p "stage/spark354/$(dirname "$p")"; \
+      cp "classes/$p.class" "stage/spark354/$p.class"; \
     done; \
     \
     jar uf rapids.jar -C stage .; \
-    unzip -l rapids.jar | grep -cE 'spark(354|-shared)/.*(LocationPreserving|GpuColumnToRow)MapPartitionsRDD' \
-      | grep -qx 4 || { echo "FATAL: expected 4 patched entries in the jar" >&2; exit 1; }; \
+    \
+    mkdir check; \
+    unzip -q rapids.jar 'spark354/*/*MapPartitionsRDD.class' \
+      'spark-shared/org/apache/spark/sql/rapids/execution/GpuColumnToRowMapPartitionsRDD$.class' -d check; \
+    for f in check/spark354/org/apache/spark/rapids/LocationPreservingMapPartitionsRDD.class \
+             check/spark354/org/apache/spark/sql/rapids/execution/GpuColumnToRowMapPartitionsRDD.class; do \
+      javap -c -p "$f" \
+        | grep -qE 'MapPartitionsRDD\."<init>":\(Lorg/apache/spark/rdd/RDD;Lscala/Function3;ZZZLscala/Option;' \
+        || { echo "FATAL: $f in the jar is not the patched class" >&2; exit 1; }; \
+    done; \
+    javap -p 'check/spark-shared/org/apache/spark/sql/rapids/execution/GpuColumnToRowMapPartitionsRDD$.class' \
+      | grep -q ' mapPartitions(' \
+      || { echo "FATAL: GpuColumnToRowMapPartitionsRDD\$ lost mapPartitions" >&2; exit 1; }; \
     echo "patched rapids.jar OK"
 
 # ---------------------------------------------------------------------------------------------
