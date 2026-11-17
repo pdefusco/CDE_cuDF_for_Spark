@@ -10,7 +10,11 @@ RAPIDS running on four Cloudera setups, and how to repeat it:
 - **Private Cloud Base, with Spark 3 on YARN and no Data Services**, on two Runtime versions. There is
   no image: each job ships the jar with `--jars`.
 
-On each setup, RAPIDS queries ran end to end on an NVIDIA A10G. Each run was checked from the final
+A fifth setup, **Data Hub on CDP Public Cloud (Runtime 7.3.2)**, is a work in progress. It is
+blocked on Cloudera Manager permissions; see
+[Work in progress: Data Hub 7.3.2](#work-in-progress-data-hub-732-cdp-public-cloud).
+
+On each of the four completed setups, RAPIDS queries ran end to end on an NVIDIA A10G. Each run was checked from the final
 query plan, not from the job status, because RAPIDS falls back to the CPU without failing the job.
 
 Internal technical prototype, not a supported configuration.
@@ -38,6 +42,78 @@ image. That is a small job: CDE's CPU image plus one jar and a short script. On 
 and the work is in the job settings, mostly around how the session handles Iceberg. On Runtime 7.3.2,
 on CDE and on Base alike, two RAPIDS classes must also be recompiled against Cloudera's Spark; on 7.1.9
 the published jar works as it is. On Base that is one script, run once on the gateway host.
+
+## Work in progress: Data Hub 7.3.2 (CDP Public Cloud)
+
+> **Status: work in progress, blocked.** The Data Hub is up and the GPU driver recipe is attached,
+> but YARN GPU scheduling can't be turned on with the Cloudera Manager role an environment owner
+> gets. No GPU node has been started yet, and no RAPIDS query has run.
+
+The goal is the same as for Base: Spark 3 on YARN, with GPU executors on a Data Hub compute group.
+
+| | **Data Hub, Runtime 7.3.2 · Data Engineering template · CDP Public Cloud (AWS)** |
+|---|---|
+| Cluster template | "7.3.2 - Data Engineering: Apache Spark3, Apache Hive, Apache Oozie" |
+| Image | The default 7.3.2 image of the `cdp-default` catalog: RHEL 9.6, no NVIDIA driver, no CUDA |
+| Cloudera Manager | 7.13.2 |
+| Cloudera Runtime | 7.3.2 (`7.3.2-1.cdh7.3.2.p20000.83281140`) |
+| Where Spark runs | YARN, from the CDH parcel. The cluster is a compute cluster attached to the environment's Data Lake |
+| Cloudera Spark build | `3.5.8.7.3.2.20000-258`, Scala 2.12.19, JDK 17. This is Spark 3.5.8, not the 3.5.4 of the other four setups |
+| Does the stock jar link? | No. 8-argument `MapPartitionsRDD` constructor, as on Base 7.3.2 |
+| RAPIDS jar | 26.10.0 (planned). It lists Spark 3.5.8 as supported (shim `spark358`) |
+| Iceberg | 1.10.1. RAPIDS 26.10 supports Iceberg 1.6 and later, so Iceberg may run on the GPU here. Not tested yet |
+| Hosts | master `m5.4xlarge` × 1, CPU workers `r5d.2xlarge` × 3, GPU compute group `p4d.24xlarge` (8 × NVIDIA A100 40 GB) at 0 nodes until GPU scheduling works |
+
+### What we found so far
+
+1. **Data Hub accepts only the p4d family for GPUs** (`p4d.24xlarge`, `p4de.24xlarge`). A `g5`
+   instance type (A10G, used in the four other setups) fails validation. A request to support
+   g5 is open with the Data Hub team. A p4d.24xlarge costs about $22 an hour on demand, so the compute
+   group stays at 0 nodes until the rest is ready.
+2. **Data Hub sets up nothing for GPUs.** The runtime image has no NVIDIA driver or CUDA. The 7.3.2
+   Data Engineering template doesn't turn on YARN GPU scheduling (`yarn.io/gpu`), and provisioning
+   installs nothing GPU-related. You install the driver yourself, with a recipe, and turn on GPU
+   scheduling in Cloudera Manager.
+3. **The driver has to come from NVIDIA's `.run` installer.** The image has no package repositories,
+   so the NVIDIA RPMs can't resolve their dependencies. The recipe, run on the compute group before
+   services start, installs:
+   - driver 615.71.10 (open kernel modules), built against the kernel-devel the image already has;
+   - Fabric Manager 615.71.10 from NVIDIA's tarball. A p4d's 8 A100s are connected through
+     NVSwitch, and CUDA won't start without a running Fabric Manager of the same version;
+   - kernel arguments for cgroup v1, because YARN GPU isolation doesn't support cgroup v2. They take
+     effect after a reboot, once the node has been added.
+
+   The recipe has been written and attached, but it hasn't run yet.
+4. **An environment owner can't turn on YARN GPU scheduling in Cloudera Manager.** This is the
+   blocker.
+   - GPU isolation needs YARN cgroups ("Use CGroups for Resource Management"). Cloudera Manager
+     refuses to restart YARN with cgroups unless every NodeManager host has "Enable Cgroup-based
+     Resource Management" turned on: *"Yarn is configured to use cgroups, but 3 hosts do not have
+     'Enable Cgroup-based Resource Management' enabled"*.
+   - That check has no "Suppress Configuration Validator" switch. Only the GPU validators have one.
+   - "Enable Cgroup-based Resource Management" is a host setting. The environment's admin group
+     (`_c_cm_admins_*`) maps in Cloudera Manager to **Limited Cluster Administrator**. That role can
+     change service and role settings, but gets HTTP 403 on host settings. No group maps to Full
+     Administrator, and changing the user's CDP role doesn't change the mapping.
+   - We've asked Cloudera's product and engineering teams for a supported way to get Full
+     Administrator on a Data Hub, or for the host setting to be turned on for this cluster.
+5. **RAPIDS will need the `spark358` shim, and the patch script will need an update.** Set
+   `spark.rapids.shims-provider-override=com.nvidia.spark.rapids.shims.spark358.SparkShimServiceProvider`.
+   `base/patch_rapids_jar.sh` currently patches only the `spark354/` classes, so it has to be
+   generalised before it can patch for this Spark build.
+
+### Remaining steps
+
+| Step | State |
+|---|---|
+| Create the Data Hub with the default 7.3.2 image and a p4d compute group at 0 nodes | Done |
+| Write the driver and Fabric Manager recipe, and attach it to the compute group | Done; not run yet |
+| Turn on YARN cgroups and "Enable Cgroup-based Resource Management" on every NodeManager host | **Blocked**: needs Full Administrator in Cloudera Manager |
+| Scale the compute group to 1, reboot it into cgroup v1, check `nvidia-smi` (8 GPUs) and Fabric Manager | To do |
+| Turn on GPU usage for the compute group's NodeManagers; check YARN reports `yarn.io/gpu` = 8 | To do |
+| Generalise `base/patch_rapids_jar.sh` to the `spark358` shim and patch the 26.10.0 jar | To do |
+| Run `base/benchmark.sh` and `base/iceberg_check.sh`, GPU against CPU | To do |
+| Write up the result as a fifth column in [Results by version](#results-by-version) | To do |
 
 ## What gets in the way, and where
 
@@ -129,6 +205,9 @@ All three are in [`docs/cde-pvc-prerequisites.md`](docs/cde-pvc-prerequisites.md
    the CPU also succeeds. The test checks for `Gpu*` operators in the final query plan.
 
 ### On Base (Spark 3 on YARN)
+
+On a Data Hub, steps 1 and 4 work differently and aren't finished. See
+[Work in progress: Data Hub 7.3.2](#work-in-progress-data-hub-732-cdp-public-cloud).
 
 The full guides are [`README-719-base.md`](README-719-base.md) (7.1.9) and
 [`README-732-base.md`](README-732-base.md) (7.3.2, which adds step 4).
