@@ -2,13 +2,13 @@
 
 GPU-accelerated Spark on Cloudera Private Cloud, using the open-source [NVIDIA RAPIDS Accelerator for
 Apache Spark](https://nvidia.github.io/spark-rapids/) (cuDF). This repo records what it took to get
-RAPIDS running on three Cloudera setups, and how to repeat it:
+RAPIDS running on four Cloudera setups, and how to repeat it:
 
 - **Cloudera Data Engineering (CDE) on Private Cloud Data Services**, on two Runtime versions. Here
   the deliverable is a **CDE custom runtime**: CDE's own Spark runtime image with the RAPIDS jar
   added, registered as a `custom-runtime-image` resource and selected per job.
-- **Private Cloud Base, with Spark 3 on YARN and no Data Services.** There is nothing to build: each
-  job ships the jar with `--jars`.
+- **Private Cloud Base, with Spark 3 on YARN and no Data Services**, on two Runtime versions. There is
+  no image: each job ships the jar with `--jars`.
 
 On each setup, RAPIDS queries ran end to end on an NVIDIA A10G. Each run was checked from the final
 query plan, not from the job status, because RAPIDS falls back to the CPU without failing the job.
@@ -17,37 +17,38 @@ Internal technical prototype, not a supported configuration.
 
 ## Results by version
 
-| | **Runtime 7.3.2.0 · Data Services 1.5.5-h3000 (Community Edition) · CDE 1.26** | **Runtime 7.1.9 SP2 CHF4 · Data Services 1.5.5 SP4 · CDE 1.27** | **Runtime 7.1.9 SP1 + PATCH-1069 · Base only · Spark 3 on YARN** |
-|---|---|---|---|
-| Guide | ➡ [`README-732.md`](README-732.md) (write-up and steps) | ➡ [`README-719.md`](README-719.md) (install guide) · [engineering notes](.internal/README-719.md) | ➡ [`README-719-base.md`](README-719-base.md) (install guide) · [engineering notes](.internal/README-719-base.md) |
-| Platform | Data Services 1.5.5-h3000, Community Edition, on ECS (RKE2 v1.33.12) | Data Services 1.5.5 SP4 on ECS | Base cluster only, no Data Services |
-| Cloudera Manager | 7.13.2.6 | 7.13.2 SP2 | 7.13.2 SP2 |
-| Cloudera Runtime | 7.3.2.0 | 7.1.9 SP2 CHF4 (`7.1.9.20400`) | 7.1.9 SP1 + PATCH-1069 (`7.1.9-1.cdh7.1.9.p1069.74330271`) |
-| Where Spark runs | CDE 1.26.0-b557 | CDE 1.27.0-b693 | YARN, from the SPARK3 parcel (CDS 3.5.4); no CDE |
-| Cloudera Spark build | `3.5.4.1.26.732.0-45` | `3.5.4.127.354.7191000.0-30` | `3.5.4.3.5.7191000.0-30` |
-| RAPIDS jar | 26.02.0, **patched**: 2 classes recompiled against Cloudera's Spark | 26.02.0, unmodified | 26.10.0, unmodified. 26.02.0 fails DataSource V2 writes here |
-| Does the stock jar link? | No. Cloudera's Spark adds a parameter (`isDeterministic`) to the `MapPartitionsRDD` constructor, which then takes 8 arguments in bytecode instead of 7 | Yes. Upstream 7-argument constructor | Yes. 7-argument constructor, checked with `javap` |
-| How the jar gets to the job | Custom runtime image `pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-p1`, from `runtime/Dockerfile` | Custom runtime image `pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-7.1.9`, from `runtime/Dockerfile.719` | `--jars` on each job; no image |
-| Iceberg | No Iceberg jars in the CDE 1.26 image | Not checked | Works, on the CPU, with `suppressPlanningFailure=true`; otherwise the session must not load Iceberg |
-| What was verified | Smoke test (CDE job run 6): 8 `Gpu*` operators in the final plan | Smoke test (CDE job run 2): 8 `Gpu*` operators in the final plan | 5-query benchmark: every query fully on the GPU, 4.5× faster than the CPU |
-| GPU workers | 3 × `g5.8xlarge` (32 vCPU, 128 GiB), 1× NVIDIA A10G 24 GB each, RHEL 9.6 | 3 × `g5.8xlarge` (32 vCPU, 128 GiB), 1× NVIDIA A10G 24 GB each, RHEL 9.6 | 3 × `g5.4xlarge` (16 vCPU, 64 GiB), 1× NVIDIA A10G 24 GB each, RHEL 9.6 |
-| NVIDIA driver | 615.71.09 (CUDA 13.4) | not recorded | 620.70.06 |
+| | **Runtime 7.3.2.0 · Data Services 1.5.5-h3000 (Community Edition) · CDE 1.26** | **Runtime 7.1.9 SP2 CHF4 · Data Services 1.5.5 SP4 · CDE 1.27** | **Runtime 7.1.9 SP1 + PATCH-1069 · Base only · Spark 3 on YARN** | **Runtime 7.3.2 · Base only · Spark 3 on YARN** |
+|---|---|---|---|---|
+| Guide | ➡ [`README-732.md`](README-732.md) (write-up and steps) | ➡ [`README-719.md`](README-719.md) (install guide) · [engineering notes](.internal/README-719.md) | ➡ [`README-719-base.md`](README-719-base.md) (install guide) · [engineering notes](.internal/README-719-base.md) | ➡ [`README-732-base.md`](README-732-base.md) (install guide) · [engineering notes](.internal/README-732-base.md) |
+| Platform | Data Services 1.5.5-h3000, Community Edition, on ECS (RKE2 v1.33.12) | Data Services 1.5.5 SP4 on ECS | Base cluster only, no Data Services | Base cluster only, no Data Services |
+| Cloudera Manager | 7.13.2.6 | 7.13.2 SP2 | 7.13.2 SP2 | 7.13.2.6 |
+| Cloudera Runtime | 7.3.2.0 | 7.1.9 SP2 CHF4 (`7.1.9.20400`) | 7.1.9 SP1 + PATCH-1069 (`7.1.9-1.cdh7.1.9.p1069.74330271`) | 7.3.2 (`7.3.2-1.cdh7.3.2.p0.77083870`) |
+| Where Spark runs | CDE 1.26.0-b557 | CDE 1.27.0-b693 | YARN, from the SPARK3 parcel (CDS 3.5.4); no CDE | YARN, from the CDH parcel (Spark 3 is part of it on 7.3.x); no CDE |
+| Cloudera Spark build | `3.5.4.1.26.732.0-45` | `3.5.4.127.354.7191000.0-30` | `3.5.4.3.5.7191000.0-30` | `3.5.4.7.3.2.0-957` |
+| RAPIDS jar | 26.02.0, **patched**: 2 classes recompiled against Cloudera's Spark | 26.02.0, unmodified | 26.10.0, unmodified. 26.02.0 fails DataSource V2 writes here | 26.10.0, **patched** on the gateway by `base/patch_rapids_jar.sh`: 2 classes recompiled against Cloudera's Spark, from the 26.10.0 source |
+| Does the stock jar link? | No. Cloudera's Spark adds a parameter (`isDeterministic`) to the `MapPartitionsRDD` constructor, which then takes 8 arguments in bytecode instead of 7 | Yes. Upstream 7-argument constructor | Yes. 7-argument constructor, checked with `javap` | No. 8-argument constructor, as on CDE 7.3.2 |
+| How the jar gets to the job | Custom runtime image `pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-p1`, from `runtime/Dockerfile` | Custom runtime image `pauldefusco/cde-rapids-runtime-3.5.4:26.02.0-7.1.9`, from `runtime/Dockerfile.719` | `--jars` on each job; no image | `--jars` on each job; no image |
+| Iceberg | No Iceberg jars in the CDE 1.26 image | Not checked | Works, on the CPU, with `suppressPlanningFailure=true`; otherwise the session must not load Iceberg | Iceberg 1.5.2. Works, on the CPU, with `suppressPlanningFailure=true`; otherwise the session must not load Iceberg |
+| What was verified | Smoke test (CDE job run 6): 8 `Gpu*` operators in the final plan | Smoke test (CDE job run 2): 8 `Gpu*` operators in the final plan | 5-query benchmark: every query fully on the GPU, 4.5× faster than the CPU | 5-query benchmark: every query fully on the GPU, 4.2× faster than the CPU |
+| GPU workers | 3 × `g5.8xlarge` (32 vCPU, 128 GiB), 1× NVIDIA A10G 24 GB each, RHEL 9.6 | 3 × `g5.8xlarge` (32 vCPU, 128 GiB), 1× NVIDIA A10G 24 GB each, RHEL 9.6 | 3 × `g5.4xlarge` (16 vCPU, 64 GiB), 1× NVIDIA A10G 24 GB each, RHEL 9.6 | 3 × `g5.4xlarge` (16 vCPU, 64 GiB), 1× NVIDIA A10G 24 GB each, RHEL 9.6 |
+| NVIDIA driver | 615.71.09 (CUDA 13.4) | not recorded | 620.70.06 | 620.70.06 |
 
-**In short:** none of the three needs a patch to Cloudera's Spark. On CDE you build a custom runtime
-image. That is a small job: CDE's CPU image plus one jar and a short script. Runtime 7.3.2 also needs
-two RAPIDS classes recompiled; 7.1.9 does not. On Base there is nothing to build, and the work is in
-the job settings, mostly around how the session handles Iceberg.
+**In short:** none of the four needs a patch to Cloudera's Spark. On CDE you build a custom runtime
+image. That is a small job: CDE's CPU image plus one jar and a short script. On Base there is no image,
+and the work is in the job settings, mostly around how the session handles Iceberg. On Runtime 7.3.2,
+on CDE and on Base alike, two RAPIDS classes must also be recompiled against Cloudera's Spark; on 7.1.9
+the published jar works as it is. On Base that is one script, run once on the gateway host.
 
 ## What gets in the way, and where
 
 Four problems came up. Which ones you hit depends on where Spark runs:
 
-| Problem | 7.3.2 on CDE | 7.1.9 on CDE | 7.1.9 SP1 on Base |
-|---|---|---|---|
-| 1. RAPIDS doesn't recognise Cloudera's Spark version | override set on every run | override set on every run | yes, seen without the override |
-| 2. No CDE GPU runtime image to use | yes | not checked (custom runtime used anyway) | does not apply |
-| 3. The RAPIDS jar doesn't link against Cloudera's Spark | yes | no | no |
-| 4. Iceberg 1.3 in the default Spark config | no (no Iceberg in the image) | not checked | yes |
+| Problem | 7.3.2 on CDE | 7.1.9 on CDE | 7.1.9 SP1 on Base | 7.3.2 on Base |
+|---|---|---|---|---|
+| 1. RAPIDS doesn't recognise Cloudera's Spark version | override set on every run | override set on every run | yes, seen without the override | yes, seen without the override |
+| 2. No CDE GPU runtime image to use | yes | not checked (custom runtime used anyway) | does not apply | does not apply |
+| 3. The RAPIDS jar doesn't link against Cloudera's Spark | yes | no | no | yes |
+| 4. An Iceberg older than 1.6 in the default Spark config | no (no Iceberg in the image) | not checked | yes (1.3) | yes (1.5.2) |
 
 **1. RAPIDS doesn't recognise Cloudera's Spark version.** RAPIDS reads the Spark version string to
 choose which of its builds to use, and Cloudera's strings (such as `3.5.4.3.5.7191000.0-30`) aren't
@@ -66,12 +67,16 @@ recreated. On 7.1.9 the stock GPU image wasn't tried; the custom runtime was use
 Details: [`docs/gpu-image-availability.md`](docs/gpu-image-availability.md).
 
 **3. On Runtime 7.3.2, the RAPIDS jar doesn't link against Cloudera's Spark.** Cloudera's 7.3.2
-Spark adds an extra parameter, with a default value, to the constructor of an internal class,
+Spark, both CDE's and the one in the Base CDH parcel, adds an extra parameter, with a default value, to the constructor of an internal class,
 `MapPartitionsRDD`. Code compiled against Cloudera's Spark is unaffected. The RAPIDS jar, however,
 was compiled against Apache Spark and calls the old constructor, so every GPU query fails on its first
 action with `NoSuchMethodError`. The fix is to recompile two NVIDIA source files, unchanged, against
-the cluster's own `spark-core`, and put the results in the jar. The Spark 3.5.4 builds tested on
-Runtime 7.1.9 don't have the extra parameter, so there the jar works as it is, on CDE and on Base.
+the cluster's own `spark-core`, and put the results in the jar. On CDE that happens while the runtime
+image is built; on Base, [`base/patch_rapids_jar.sh`](base/patch_rapids_jar.sh) does it on the
+gateway host. The Spark 3.5.4 builds tested on Runtime 7.1.9 don't have the extra parameter, so there
+the jar works as it is, on CDE and on Base. A scan of every Spark method and class the jar uses,
+against 7.3.2 Base's Spark, found nothing else broken on a default code path
+([`docs/linkage-scan.md`](docs/linkage-scan.md#runtime-732-base-spark-3-on-yarn)).
 Details: [`docs/oss-rapids-vs-cloudera-spark.md`](docs/oss-rapids-vs-cloudera-spark.md),
 [`runtime/README-patch.md`](runtime/README-patch.md).
 
@@ -84,8 +89,9 @@ image, a cluster host or a parcel URL, and says whether the stock jar links. On 
 also checks the constructor while it builds, so the wrong choice fails the build instead of your first
 GPU job. See [`runtime/README.md`](runtime/README.md).
 
-**4. On Base, the default Spark config loads Iceberg 1.3.** CDS 3.5.4 turns Iceberg on in every
-session, and RAPIDS 26.10 supports only Iceberg 1.6 and later. When it sees the older Iceberg, it fails
+**4. On Base, the default Spark config loads an Iceberg that RAPIDS can't handle.** Spark 3 on Base
+turns Iceberg on in every session: 1.3 with CDS 3.5.4 on 7.1.9, 1.5.2 on 7.3.2. RAPIDS 26.10 supports
+only Iceberg 1.6 and later. When it sees the older Iceberg, it fails
 any query that reads or writes through Spark's DataSource V2 API, even if no Iceberg table is
 involved. That API covers Iceberg tables, `writeTo(...)` and the `noop` sink. Parquet files and Hive
 tables go through the older V1 API, and they run on the GPU regardless. There are two ways to handle
@@ -124,7 +130,8 @@ All three are in [`docs/cde-pvc-prerequisites.md`](docs/cde-pvc-prerequisites.md
 
 ### On Base (Spark 3 on YARN)
 
-The full guide is [`README-719-base.md`](README-719-base.md).
+The full guides are [`README-719-base.md`](README-719-base.md) (7.1.9) and
+[`README-732-base.md`](README-732-base.md) (7.3.2, which adds step 4).
 
 1. **Turn on YARN GPU scheduling.** On RHEL 9, every NodeManager host must boot with cgroup v1. In
    Cloudera Manager, turn on cgroups, the Linux Container Executor and GPU usage for the NodeManagers
@@ -134,9 +141,12 @@ The full guide is [`README-719-base.md`](README-719-base.md).
    Spark 3 gateway host.
 3. **Download the RAPIDS jar and the GPU discovery script** to the gateway host, with
    `base/plugin_load.sh`.
-4. **Submit jobs with the jar and the RAPIDS settings.** Pass the jar with `--jars`, and set the shim
+4. **On 7.3.2, patch the jar** with `base/patch_rapids_jar.sh`, and use the copy it writes to
+   `/tmp/rapids-patched/`. `base/check_cluster.sh` shows whether your Spark needs it: an
+   8-argument `MapPartitionsRDD` constructor.
+5. **Submit jobs with the jar and the RAPIDS settings.** Pass the jar with `--jars`, and set the shim
    override, the Kryo registrator and `suppressPlanningFailure=true`. §6 has the full command.
-5. **Check the final query plan**, not the job status, to see what ran on the GPU (§7).
+6. **Check the final query plan**, not the job status, to see what ran on the GPU (§7).
    `base/benchmark.sh` does this for a five-query benchmark, and `base/iceberg_check.sh` for Iceberg
    and Hive tables.
 
@@ -148,7 +158,10 @@ README-719.md               Runtime 7.1.9 / CDE 1.27 install guide: tested versi
 .internal/README-719.md     Runtime 7.1.9 engineering notes: why no patch is needed, comparison with 7.3.2
 README-719-base.md          Base 7.1.9 SP1, Spark 3 on YARN (no CDE) guide: YARN GPU setup, settings, benchmark
 .internal/README-719-base.md  Base engineering notes: the requirements, Iceberg and DataSource V2, 26.02.0, CDE comparison
-base/                       Base scripts, run on a Spark 3 gateway: check_cluster, plugin_load, benchmark, iceberg_check, summary, diagnose
+README-732-base.md          Base 7.3.2, Spark 3 on YARN guide: the 7.1.9 setup plus patching the jar on the gateway
+.internal/README-732-base.md  Base 7.3.2 engineering notes: the patch, the linkage scan, comparison with the other three
+base/                       Base scripts, run on a Spark 3 gateway: check_cluster, plugin_load, patch_rapids_jar,
+                            benchmark, iceberg_check, linkage_scan, summary, diagnose
 runtime/Dockerfile          7.3.2 custom runtime: two-stage, recompiles 2 RAPIDS classes in-image
 runtime/Dockerfile.719      7.1.9 custom runtime: unpatched OSS jar, no patcher stage
 runtime/README.md           which Dockerfile, fetching the jar, building
@@ -163,7 +176,7 @@ probes/                     the differential image probe behind problem 2 (no us
 docs/custom-gpu-runtime.md  the 7.3.2 end-to-end runbook: versions, Docker + CDE CLI, verified output
 docs/gpu-image-availability.md        problem 2 in full: the probe, its reasoning, the chart hatch
 docs/oss-rapids-vs-cloudera-spark.md  the build-range evidence for problem 3 (the 7.3.2 linkage break)
-docs/linkage-scan.md        how much else is broken on 7.3.2: 4,473 refs scanned, 16 misses, 1 reachable
+docs/linkage-scan.md        how much else is broken on 7.3.2: the CDE 1.26 hand scan, and base/linkage_scan.sh on Base
 docs/rapids-spark-conf.md   Spark RAPIDS configuration and the version-lock matrix
 docs/cde-pvc-prerequisites.md         DE role, keytab onboarding, proxy 421: all block every job
 docs/slides.md              two leadership slides: highlights, and the proposed productized patch

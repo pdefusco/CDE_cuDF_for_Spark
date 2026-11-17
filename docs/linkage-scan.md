@@ -1,6 +1,9 @@
 # How much else is broken? A jar-wide linkage scan
 
-Background detail for `README-732.md` §8.
+Background detail for `README-732.md` §8 (CDE 7.3.2) and `README-732-base.md` (Base 7.3.2). The scan
+below was done by hand against CDE 1.26 and the 26.02.0 jar. It is now a script,
+[`base/linkage_scan.sh`](../base/linkage_scan.sh), and its Base 7.3.2 results are in
+[their own section](#runtime-732-base-spark-3-on-yarn), which also corrects row 4 of the triage.
 
 The patch in `runtime/` fixes **one** `NoSuchMethodError`. The obvious next question is whether it is
 the only one, or the first of many. Guessing is cheap and worthless in both directions — "it's one
@@ -55,8 +58,8 @@ A raw miss list is **not** a defect list. Each was traced back to its calling by
 |---|---|---|
 | 1–2 | `FileScan.org$apache$spark$…$$normalizedPartitionFilters$`, `…$$normalizedDataFilters$` | **Real mismatch, unreachable by default.** See below. |
 | 3 | `CreateHiveTableAsSelectCommand.outputColumns()` | **False positive — mis-attributed.** RAPIDS calls `DataWritingCommand.outputColumns$(DataWritingCommand)`, which 1.26 declares. |
-| 4 | `CreateHiveTableAsSelectCommand.getWritingCommand(…)` | **Real and reachable.** The one that survives. See below. |
-| 5–6 | `MergedBlockMeta.readChunkBitmaps()`, `MapOutputTracker.getMapSizesForMergeResult(…)` | Push-based shuffle merge only — off by default. |
+| 4 | `CreateHiveTableAsSelectCommand.getWritingCommand(…)` | **Real mismatch, unreachable on Spark 3.4+.** First ranked as the one that survives; corrected after the Base 7.3.2 scan. See below. |
+| 5–6 | `MergedBlockMeta.readChunkBitmaps()`, `MapOutputTracker.getMapSizesForMergeResult(…)` | **Real, and misses on Apache Spark too.** Push-based shuffle merge only — off by default. See below. |
 | 7–9 | `StoragePartitionJoinParams.<init>`, `.apply$default$3`, `.apply$default$5` | Storage-partitioned join only — `spark.sql.sources.v2.bucketing.enabled` defaults to `false`. |
 | 10–16 | `InSubqueryExec.copy` + `copy$default$4…9` | **False positive — dead code.** See below. |
 
@@ -98,7 +101,7 @@ Two things demote it:
 So this fires only if you explicitly shorten `useV1SourceList` or read through a v2-only catalog. It is
 also the structural reason the CAI demos ran Parquet at scale on 1.25 without ever hitting it — not luck.
 
-### 4, Hive-serde CTAS: the one that survives
+### 4, Hive-serde CTAS: real, but not registered on 3.4+
 
 ```
 RAPIDS calls:  CreateHiveTableAsSelectCommand.getWritingCommand(SessionCatalog, CatalogTable, boolean)
@@ -108,14 +111,67 @@ RAPIDS calls:  CreateHiveTableAsSelectCommand.getWritingCommand(SessionCatalog, 
 Apache 3.5.9 declares it identically to Cloudera, so this is **Apache maintenance drift after 3.5.4**,
 not a Cloudera fork difference — it would break on Apache 3.5.9 too.
 
-It is reached only by `GpuCreateHiveTableAsSelectCommand`, i.e. `CREATE TABLE … AS SELECT` or
-`saveAsTable` against a **Hive-serde** table (`USING hive`, `STORED AS …`). The default datasource
-provider routes `saveAsTable` to `GpuCreateDataSourceTableAsSelectCommand`, and writes into an
-*existing* table go to `GpuInsertIntoHiveTable`. Neither touches it. Hive **reads** never touch it.
+Its only caller is `GpuCreateHiveTableAsSelectCommand`, i.e. `CREATE TABLE … AS SELECT` or
+`saveAsTable` against a **Hive-serde** table (`USING hive`, `STORED AS …`).
 
-**This one would not be a pure recompile.** The argument list changed, so unlike `MapPartitionsRDD` the
-upstream source is no longer source-compatible; `runtime/patch/` would need a real one-line edit to drop
-the `SessionCatalog` argument. It is deliberately **not** patched pre-emptively — see "limits" below.
+**Correction: that caller is never reached on 3.5.4.** This was first ranked "real and reachable, the
+one that survives". The automated reachability pass on Base 7.3.2 dropped it, and the bytecode agrees:
+only the `spark330`–`spark334` `HiveProviderCmdShims` register `CreateHiveTableAsSelectCommand` for GPU
+replacement. From `spark340` on, `spark354` included, they register only `InsertIntoHiveTable`, and
+`GpuCreateHiveTableAsSelectCommandMeta` is referenced by nothing but itself. The same holds in the
+26.02.0 jar used here. A Hive-serde CTAS on 3.5.4 is not converted by RAPIDS at all, so it never
+reaches the mismatched call.
+
+A fix would not be a pure recompile anyway: the argument list changed, so unlike `MapPartitionsRDD`
+the upstream source is no longer source-compatible. Nothing reaches it, so nothing is patched.
+
+### 5–6, push-based shuffle: a RAPIDS shading bug
+
+Both descriptors name RAPIDS's shaded copy of RoaringBitmap:
+
+```
+RAPIDS calls:   MergedBlockMeta.readChunkBitmaps()[Lcom/nvidia/shaded/spark/org/roaringbitmap/RoaringBitmap;
+Spark declares: MergedBlockMeta.readChunkBitmaps()[Lorg/roaringbitmap/RoaringBitmap;
+```
+
+and likewise for `getMapSizesForMergeResult(II…RoaringBitmap;)`. RAPIDS relocated a library type that
+appears in Spark's own method signatures, so these miss on Apache Spark as well; it isn't a Cloudera
+difference. Same references in 26.02.0 and 26.10.0. The callers are `RapidsPushBasedFetchHelper` and
+its anonymous class, which run only with `spark.shuffle.push.enabled=true` (default `false`).
+
+## Runtime 7.3.2 Base, Spark 3 on YARN
+
+Run with [`base/linkage_scan.sh`](../base/linkage_scan.sh) on ds1116's gateway, against the CDH
+parcel's `lib/spark3/jars` (Spark `3.5.4.7.3.2.0-957`) plus the client `classpath.txt`, and the
+26.10.0 jar both stock and after `base/patch_rapids_jar.sh`. Patched jar:
+
+| | Total | Delta/Iceberg/Databricks only | Unreachable only | To triage |
+|---|---:|---:|---:|---:|
+| Missing members | 248 | 98 | 146 | **4** |
+| Missing classes | 243 | 233 | 10 | **0** |
+| Unverified (inherited from a JDK class) | 14 | – | 1 | 13 |
+
+In scope: 6,459 of the jar's 22,400 classes, 5,867 of them reachable. External Spark member
+references: 4,836 unique, 3,700 resolve. These counts aren't comparable with the 1.26 table above:
+a different jar (26.10.0, 22,400 classes against 17,833), a different classpath, and here the Delta, Iceberg and Databricks
+misses are inside the total rather than set aside.
+
+**Two-way control:** the stock-vs-patched diff is exactly one member, the 7-argument
+`MapPartitionsRDD.<init>`, missing from the stock jar only.
+
+The four to triage are the 1.26 rows 1–2 and 5–6, unchanged:
+
+| missing symbol | caller | verdict |
+|---|---|---|
+| `FileScan.…$$normalizedDataFilters$`, `…$$normalizedPartitionFilters$` | `spark354/…/GpuOrcScan` (+2 more) | As rows 1–2: DataSource V2 file scans only; `useV1SourceList` keeps Parquet, ORC and CSV on V1. |
+| `MapOutputTracker.getMapSizesForMergeResult(II…RoaringBitmap;)` | `spark354/…/RapidsPushBasedFetchHelper` | As rows 5–6: the shading bug; push-based shuffle only. |
+| `MergedBlockMeta.readChunkBitmaps()` | `spark-shared/…/RapidsPushBasedFetchHelper$anon$1` (+1 more) | Same. |
+
+The 13 unverified are standard JDK methods reached through Spark types (`Throwable.getCause`,
+`AutoCloseable.close`, `Future.isCancelled`, `ClassLoader.loadClass` and similar). Rows 3, 4 and
+7–16 aren't among the four: each one either resolves against 7.3.2's Spark or has no reachable
+caller (row 4 for the reason given above). Nothing reachable by default is left, which
+matches the benchmark and Iceberg runs in `README-732-base.md`.
 
 ## Limits — what this scan does not tell you
 
@@ -130,26 +186,34 @@ Stated plainly, because 99.6% invites over-reading:
    reflection leave nothing in a constant pool.
 3. **Scope was RAPIDS → Spark.** Not RAPIDS → Hadoop/Hive/Parquet/ORC/Arrow, not Spark's callbacks into
    RAPIDS, and not the JNI/cuDF native layer.
-4. **Reachability was hand-traced** for the ambiguous shim cases. That is where the `InSubqueryExec`
-   false positive was caught — and the same hand-tracing could in principle discard a real one.
+4. **Reachability was hand-traced** on CDE 1.26 for the ambiguous shim cases. That is where the
+   `InSubqueryExec` false positive was caught — and the same hand-tracing could in principle discard a
+   real one. `base/linkage_scan.sh` now computes it, but per class, not per method: a dead method in a
+   live class still counts as live. So it over-reports, and it is what showed row 4 was over-reported.
 5. **The harness had bugs.** Four were found and fixed during the run (a `javap` path quirk for
    hyphenated entries, a resolution-performance bug, a constant-pool quoting mismatch worth 284 false
    positives, and a missing implicit `java.lang.Object` supertype worth 19). The triage above then found
    a fifth class of error. Assume there is a sixth.
-6. **It is pinned to these exact jars.** Any CDE patch release moves the target; re-run it.
+6. **It is pinned to these exact jars.** Any CDE patch release or Runtime upgrade moves the target;
+   re-run it.
 
 **So: this is a strong bound on one class of failure, not a completeness proof.** The 16 are
 *predictions to test*, and running the real 250M-row ETL is the test.
 
 ## Re-running it
 
-The scan is not checked in as a script — it was a one-off and the triage mattered more than the
-automation. To redo it: extract the jar, keep `spark354/`, `spark-shared/`, `com/`, `org/`, `ai/`, and
-for each class resolve every `Methodref`/`Fieldref`/`InterfaceMethodref` whose owner is an
-`org/apache/spark/**` class against `javap -p -s` output from `/opt/spark/jars/*.jar` inside the runtime
-image — walking supertypes, and including implicit `java.lang.Object`.
+On a Base gateway, after `base/plugin_load.sh` (and `base/patch_rapids_jar.sh`, if it applies):
 
-The cheap per-finding version, which is what the triage actually used:
+```bash
+base/linkage_scan.sh       # RAPIDS_VERSION, WORK, OUT as for the other base/ scripts
+```
+
+It finds the Spark 3 jars in the SPARK3 parcel (7.1.9) or the CDH parcel (7.3.x). The scan itself is
+an embedded Python script whose arguments are a Spark jars directory, a `classpath.txt` (may be
+absent) and the RAPIDS jar(s), so for CDE it can be pointed at `/opt/spark/jars` copied out of the
+runtime image. That hasn't been done; the 1.26 numbers above come from the earlier hand scan.
+
+The cheap per-finding check, which is what the triage actually used:
 
 ```bash
 # what RAPIDS calls

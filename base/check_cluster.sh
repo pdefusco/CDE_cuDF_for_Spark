@@ -15,15 +15,17 @@ yarn node -list -showDetails 2>/dev/null | grep -E "Node-Id|Total-Nodes|Resource
 echo "== Parcels"
 ls -1 /opt/cloudera/parcels
 
-echo "== $(basename $spark) parcel.json version"
-grep -m1 '"version"' $spark/meta/parcel.json
+# The parcel's own version is in its directory name; parcel.json's first "version" is a component's.
+echo "== Spark 3 parcel"
+basename "$(readlink -f $spark)"
 echo "== $(basename $spark_submit) --version"
 $spark_submit --version 2>&1 | grep -vE "^\s*$" | head -12
 echo "== Key jars"
 ls -1 $spark/lib/spark3/jars | grep -E "^(spark-(core|sql|catalyst)_|scala-library|hadoop-client|parquet-hadoop|arrow-vector|hive-exec)"
 
 # 7 args is Apache's constructor, which the published RAPIDS jar links against. Cloudera's 7.3.2
-# Spark line has 8 (an added isDeterministic), and needs the patched jar; see README-732.md.
+# Spark line has 8 (an added isDeterministic), and needs the patched jar: base/patch_rapids_jar.sh on
+# Base (README-732-base.md), a custom runtime image on CDE (README-732.md).
 echo "== MapPartitionsRDD constructor"
 if command -v javap >/dev/null; then
   # The parcel also ships an unversioned spark-core_2.12.jar alias, so take one jar for the classpath.

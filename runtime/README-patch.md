@@ -23,7 +23,8 @@ Cloudera added a sixth constructor parameter to `MapPartitionsRDD` in this build
 Full diagnosis, including the build-range evidence showing this is a 7.3.2-window change and not a
 Cloudera-fork-wide one, is in [`../docs/oss-rapids-vs-cloudera-spark.md`](../docs/oss-rapids-vs-cloudera-spark.md).
 
-**This patch is for Spark builds with the 8-arg constructor, and has been tested only on 7.3.2's.**
+**This patch is for Spark builds with the 8-arg constructor, and has been tested only on 7.3.2's**
+(CDE 1.26 here; Base 7.3.2 uses the same recompile without an image, see below).
 The Spark 3.5.4 builds tested on Runtime 7.1.9 (`3.5.4.127.354.7191000.0-30` on CDE 1.27,
 `3.5.4.3.5.7191000.0-30` on Base) keep the upstream 7-arg constructor. There the OSS jar links as
 published, and `Dockerfile.719` ships it unmodified. Building this `Dockerfile` against the 7.1.9 base
@@ -77,6 +78,28 @@ enough to trust by reading it.
 
 Only the patched jar crosses into the runtime stage, so the unpatched 887 MB copy never lands in a
 layer of the final image.
+
+## On Base: `base/patch_rapids_jar.sh`
+
+Spark 3 on YARN on Base 7.3.2 (`3.5.4.7.3.2.0-957`, in the CDH parcel) has the same 8-arg
+constructor. There is no image to build, so [`../base/patch_rapids_jar.sh`](../base/patch_rapids_jar.sh)
+does steps 1–3 on the gateway, with the parcel's own `scala-compiler` 2.12.19 against
+`lib/spark3/jars`. It differs from this stage in three ways:
+
+- **Source at the jar's own tag.** It fetches both files from `NVIDIA/spark-rapids` at the tag of the
+  jar being patched (tested: `v26.10.0`), instead of using the `v26.02.0` copies in `patch/`.
+- **Two entries, not four.** Only the two `spark354/` classes are replaced. The `spark-shared/`
+  companions are left as published: neither calls `MapPartitionsRDD`, and the published
+  `GpuColumnToRowMapPartitionsRDD$` has a `mapPartitions(...)` method, used by the ColumnarRdd export
+  path, that the standalone `GpuColumnToRowMapPartitionsRDD.scala` doesn't define. Step 4 above
+  overwrites it with a companion that lacks the method. That is a latent bug in this `Dockerfile`,
+  reached only by jobs that export GPU data through ColumnarRdd (XGBoost and similar), and not yet
+  fixed here. See [`../.internal/README-732-base.md`](../.internal/README-732-base.md) §3.
+- **More asserts.** Besides the `ZZZLscala/Option;` check, it asserts each class's own constructor
+  descriptor and class-file major version (52) are unchanged, and compares CRCs to confirm that only
+  those two entries differ from the published jar.
+
+Install steps are in [`../README-732-base.md`](../README-732-base.md).
 
 ## Provenance of `patch/`
 
