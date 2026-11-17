@@ -8,11 +8,14 @@
 # Run on a Spark 3 gateway host after plugin_load.sh (which downloads the jar and discovery script),
 # as a user with a Kerberos ticket. Env: RAPIDS_VERSION (default 26.10.0), WORK (default /tmp/rapids),
 # ROWS (default 300000000; generated once into /tmp/rapids-bench on HDFS), RUNS (default "gpu cpu"),
-# STOCK_CONF=1 to keep the stock /etc/spark3/conf, Iceberg included, SINK=parquet to write each result
+# STOCK_CONF=1 to keep the stock Spark 3 client config, Iceberg included, SINK=parquet to write each result
 # with the DataSource V1 Parquet writer instead of the (V2) noop sink, and GPU_CONF for extra spark args
 # on the GPU run only (e.g. "--conf spark.rapids.sql.suppressPlanningFailure=true").
 # Executor sizing below assumes 3 NodeManagers with 14 vcores, 48 GB and one GPU each.
 set -u
+# Spark 3 is the SPARK3 (CDS 3.5) parcel on 7.1.9 and part of the CDH parcel on 7.3.x.
+spark_conf=/etc/spark3/conf; [[ -d $spark_conf ]] || spark_conf=/etc/spark/conf
+spark_shell=$(command -v spark3-shell || command -v spark-shell)
 dir=${WORK:-/tmp/rapids}
 jar=$dir/rapids-4-spark_2.12-${RAPIDS_VERSION:-26.10.0}-cuda12.jar
 provider=com.nvidia.spark.rapids.shims.spark354.SparkShimServiceProvider
@@ -20,16 +23,16 @@ export ROWS=${ROWS:-300000000}
 cd $dir
 
 echo "== Where Iceberg enters the Spark 3 client config"
-grep -rliE iceberg /etc/spark3/conf/ 2>/dev/null
-grep -rhoiE "[^:,\"= ]*iceberg[^:,\"' ]*" /etc/spark3/conf/ 2>/dev/null | sort -u | cut -c1-200 | head -20
+grep -rliE iceberg $spark_conf/ 2>/dev/null
+grep -rhoiE "[^:,\"= ]*iceberg[^:,\"' ]*" $spark_conf/ 2>/dev/null | sort -u | cut -c1-200 | head -20
 find /opt/cloudera/parcels/ -name 'iceberg-spark*.jar' 2>/dev/null | head
 
 if [[ "${STOCK_CONF:-0}" == 1 ]]; then
-  echo "== STOCK_CONF=1: using /etc/spark3/conf as-is, Iceberg included"
+  echo "== STOCK_CONF=1: using $spark_conf as-is, Iceberg included"
   unset SPARK_CONF_DIR
 else
   conf=$dir/conf-noiceberg
-  rm -rf $conf && mkdir -p $conf && cp -rL /etc/spark3/conf/. $conf/
+  rm -rf $conf && mkdir -p $conf && cp -rL $spark_conf/. $conf/
   sed -i -E '/^spark\.sql\.extensions=|^spark\.sql\.catalog\.spark_catalog|^spark\.[A-Za-z.]*iceberg/Id' $conf/spark-defaults.conf
   for f in $(grep -rliE iceberg $conf); do
     sed -i -E "s#[^:,\"= ]*iceberg[^:,\"' ]*[:,]?##Ig" "$f"
@@ -114,7 +117,7 @@ cpu=(--conf spark.executor.memory=22g --conf spark.executor.memoryOverhead=4g)
 bench() {  # $1 = label, rest = spark args
   local label=$1; shift
   echo; echo "########## $label"
-  timeout 3000 spark3-shell "${common[@]}" "$@" -i $dir/bench.scala < /dev/null > $dir/bench-$label.log 2>&1
+  timeout 3000 $spark_shell "${common[@]}" "$@" -i $dir/bench.scala < /dev/null > $dir/bench-$label.log 2>&1
   echo "exit=$?  (full log: $dir/bench-$label.log)"
   grep -E "^(PROBE|BENCH)" $dir/bench-$label.log | cut -c1-400
   echo "-- errors"

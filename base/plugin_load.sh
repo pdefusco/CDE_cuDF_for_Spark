@@ -4,6 +4,9 @@
 # Run on a Spark 3 gateway host, as a user with a Kerberos ticket and an HDFS home directory.
 # Env: RAPIDS_VERSION (default 26.10.0), WORK (default /tmp/rapids).
 set -u
+# Spark 3 is the SPARK3 (CDS 3.5) parcel on 7.1.9 and part of the CDH parcel on 7.3.x.
+spark_conf=/etc/spark3/conf; [[ -d $spark_conf ]] || spark_conf=/etc/spark/conf
+spark_shell=$(command -v spark3-shell || command -v spark-shell)
 ver=${RAPIDS_VERSION:-26.10.0}
 dir=${WORK:-/tmp/rapids}
 jar=$dir/rapids-4-spark_2.12-$ver-cuda12.jar
@@ -47,7 +50,7 @@ EOF
 run() {  # $1 = label, rest = extra --conf args
   local label=$1; shift
   echo; echo "########## $label"
-  timeout 900 spark3-shell --master yarn --deploy-mode client --conf spark.ui.showConsoleProgress=false \
+  timeout 900 $spark_shell --master yarn --deploy-mode client --conf spark.ui.showConsoleProgress=false \
     --jars $jar --files $dir/getGpusResources.sh \
     --conf spark.plugins=com.nvidia.spark.SQLPlugin \
     --conf spark.rapids.sql.enabled=true \
@@ -68,10 +71,10 @@ run() {  # $1 = label, rest = extra --conf args
 }
 
 echo "== Serializer settings from the Spark 3 client config"
-grep -hE 'serializer|kryo' /etc/spark3/conf/spark-defaults.conf || echo "(none)"
+grep -hE 'serializer|kryo' $spark_conf/spark-defaults.conf || echo "(none)"
 # Cloudera's Spark 3 defaults to Kryo, and RAPIDS refuses to start under Kryo without its registrator.
 # Append to any registrator CM already sets rather than replacing it.
-existing=$(sed -nE 's/^spark\.kryo\.registrator=(.*)/\1/p' /etc/spark3/conf/spark-defaults.conf)
+existing=$(sed -nE 's/^spark\.kryo\.registrator=(.*)/\1/p' $spark_conf/spark-defaults.conf)
 kryo=com.nvidia.spark.rapids.GpuKryoRegistrator${existing:+,$existing}
 
 # The as-is result does not change between runs, so only repeat it if it has not already failed.

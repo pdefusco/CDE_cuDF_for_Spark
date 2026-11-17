@@ -8,6 +8,8 @@
 # (default /tmp/rapids), SUPPRESS_RUNS (default "true false"), DB (default rapids_test; dropped tables
 # only, the database is kept), DB_LOCATION (default /tmp/rapids-bench/rapids_test.db).
 set -u
+# Spark 3 is the SPARK3 (CDS 3.5) parcel on 7.1.9 and part of the CDH parcel on 7.3.x.
+spark_shell=$(command -v spark3-shell || command -v spark-shell)
 dir=${WORK:-/tmp/rapids}
 jar=$dir/rapids-4-spark_2.12-${RAPIDS_VERSION:-26.10.0}-cuda12.jar
 provider=com.nvidia.spark.rapids.shims.spark354.SparkShimServiceProvider
@@ -80,7 +82,7 @@ gpu=(--jars $jar --files $dir/getGpusResources.sh
 for s in ${SUPPRESS_RUNS:-true false}; do
   log=$dir/iceberg-suppress-$s.log
   echo; echo "########## suppressPlanningFailure=$s"
-  timeout 1800 spark3-shell "${common[@]}" "${gpu[@]}" --conf spark.rapids.sql.suppressPlanningFailure=$s \
+  timeout 1800 $spark_shell "${common[@]}" "${gpu[@]}" --conf spark.rapids.sql.suppressPlanningFailure=$s \
     -i $dir/iceberg.scala < /dev/null > $log 2>&1
   echo "exit=$?  (full log: $log)"
   grep -E "^(PROBE|ICE)" $log | cut -c1-400

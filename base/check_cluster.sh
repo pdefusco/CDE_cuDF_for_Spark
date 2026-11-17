@@ -2,7 +2,10 @@
 # Is YARN advertising GPUs, and what exactly is in the Spark 3 parcel?
 # Run on a Spark 3 gateway host, as a user with a Kerberos ticket (kinit first).
 set -u
-spark=/opt/cloudera/parcels/SPARK3
+# Spark 3 is the SPARK3 (CDS 3.5) parcel on 7.1.9 and part of the CDH parcel on 7.3.x.
+spark=/opt/cloudera/parcels/SPARK3; [[ -d $spark ]] || spark=/opt/cloudera/parcels/CDH
+spark_conf=/etc/spark3/conf; [[ -d $spark_conf ]] || spark_conf=/etc/spark/conf
+spark_submit=$(command -v spark3-submit || command -v spark-submit)
 
 echo "== klist"; klist | sed -n '1,3p'
 
@@ -12,10 +15,10 @@ yarn node -list -showDetails 2>/dev/null | grep -E "Node-Id|Total-Nodes|Resource
 echo "== Parcels"
 ls -1 /opt/cloudera/parcels
 
-echo "== SPARK3 parcel.json version"
+echo "== $(basename $spark) parcel.json version"
 grep -m1 '"version"' $spark/meta/parcel.json
-echo "== spark3-submit --version"
-spark3-submit --version 2>&1 | grep -vE "^\s*$" | head -12
+echo "== $(basename $spark_submit) --version"
+$spark_submit --version 2>&1 | grep -vE "^\s*$" | head -12
 echo "== Key jars"
 ls -1 $spark/lib/spark3/jars | grep -E "^(spark-(core|sql|catalyst)_|scala-library|hadoop-client|parquet-hadoop|arrow-vector|hive-exec)"
 
@@ -23,13 +26,14 @@ ls -1 $spark/lib/spark3/jars | grep -E "^(spark-(core|sql|catalyst)_|scala-libra
 # Spark line has 8 (an added isDeterministic), and needs the patched jar; see README-732.md.
 echo "== MapPartitionsRDD constructor"
 if command -v javap >/dev/null; then
-  javap -cp "$(ls $spark/lib/spark3/jars/spark-core_*.jar)" -p org.apache.spark.rdd.MapPartitionsRDD | grep "MapPartitionsRDD("
+  # The parcel also ships an unversioned spark-core_2.12.jar alias, so take one jar for the classpath.
+  javap -cp "$(ls $spark/lib/spark3/jars/spark-core_*.jar | head -1)" -p org.apache.spark.rdd.MapPartitionsRDD | grep "MapPartitionsRDD("
 else
   echo "javap not found (JRE only); install a JDK, or run the javap in README-719.md §8 against the jar"
 fi
 
 echo "== Iceberg in the Spark 3 client config (RAPIDS 26.10 fails DSv2 queries while it is there)"
-grep -rhoiE "[^:,\"= ]*iceberg[^:,\"' ]*" /etc/spark3/conf/ 2>/dev/null | sort -u | cut -c1-200
+grep -rhoiE "[^:,\"= ]*iceberg[^:,\"' ]*" $spark_conf/ 2>/dev/null | sort -u | cut -c1-200
 
 echo "== Anything RAPIDS/GPU-related in the parcel"
 find $spark -maxdepth 4 \( -iname '*rapids*' -o -iname '*cudf*' -o -iname '*gpu*' \) 2>/dev/null | head -20

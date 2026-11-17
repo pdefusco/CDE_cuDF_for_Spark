@@ -3,13 +3,16 @@
 # Iceberg jars are, the RAPIDS lines and Iceberg stack from the logs, and the tail of each log.
 # Run on the gateway host that ran plugin_load.sh / benchmark.sh. Env: WORK (default /tmp/rapids).
 set -u
+# Spark 3 is the SPARK3 (CDS 3.5) parcel on 7.1.9 and part of the CDH parcel on 7.3.x.
+spark=/opt/cloudera/parcels/SPARK3; [[ -d $spark ]] || spark=/opt/cloudera/parcels/CDH
+spark_conf=/etc/spark3/conf; [[ -d $spark_conf ]] || spark_conf=/etc/spark/conf
 dir=${WORK:-/tmp/rapids}
 clean() { sed -E 's/\r/\n/g' "$1" | grep -vE "^\s*$|\[Stage [0-9]+:" ; }
 
 echo "== Spark 3 client defaults touching extensions/plugins/iceberg/catalog"
-grep -hiE "extensions|plugins|iceberg|catalog|adaptive" /etc/spark3/conf/spark-defaults.conf | cut -c1-300
-echo "== Iceberg jars (the ones on the Spark 3 classpath are under SPARK3/lib/iceberg)"
-find /opt/cloudera/parcels/SPARK3/lib/ /opt/cloudera/parcels/CDH/jars/ -name 'iceberg-*.jar' 2>/dev/null | sort | head -20
+grep -hiE "extensions|plugins|iceberg|catalog|adaptive" $spark_conf/spark-defaults.conf | cut -c1-300
+echo "== Iceberg jars (the ones on the Spark 3 classpath are under $(basename $spark)/lib/iceberg)"
+find $spark/lib/ /opt/cloudera/parcels/CDH/jars/ -name 'iceberg-*.jar' 2>/dev/null | sort | head -20
 
 for f in shim-override bench-gpu; do
   echo; echo "################ $f.log"
